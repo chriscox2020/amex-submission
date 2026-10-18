@@ -1,0 +1,7 @@
+.venv
+local-data
+out
+screenshots
+statements
+tests
+.git
