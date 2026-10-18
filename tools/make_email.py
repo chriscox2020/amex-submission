@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""make_v6-style builder (v7): one email HTML per employee, linking to their
+"""STANDARD TEMPLATE (Chris, Oct 18 2026): "<Name>'s Amex charges", then name, due line, short instructions, and one Open my charges button. No charges in the email.
+make_v6-style builder (v7): one email HTML per employee, linking to their
 private page on https://amex.coxresearch.com.  The email has NO flag/submit
 GET links on purpose - Outlook Safe Links / scanners open links automatically,
 which would fake flags. All flagging and submitting happens on the page (POST).
@@ -28,21 +29,16 @@ for e in doc['employees']:
                    f"<td style='{TD}'>{esc(r['category'])}</td><td style='{TD}'>{esc(r['company'])}</td>"
                    f"<td style='{TD}' align='right'><b>${r['amount']:,.2f}</b></td>"
                    f"<td style='{TD}' align='center'><a href='{esc(url)}?do=flag&amp;row={r['id']}' style='{FLB}'>&#9873; Flag</a></td></tr>" for i, r in enumerate(e['rows']))
+    first = esc(e['first'])
     h = (f"<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;font-family:Arial,Helvetica,sans-serif;color:#222'><tr><td style='padding:8px'>"
-         f"<p style='margin:8px 0 2px;font-size:20px;font-weight:bold'>{esc(e['first'])}</p>"
+         f"<p style='margin:8px 0 14px;font-size:22px;font-weight:bold'>{first}'s Amex charges</p>"
+         f"<p style='margin:0 0 4px;font-size:18px;font-weight:bold'>{first}</p>"
          f"<p style='margin:0 0 16px;font-size:14px;color:#555'>{esc(doc.get('due', 'Due by the first'))}</p>"
-         f"<p style='font-size:16px;margin:0 0 18px'>Your American Express charges for the {esc(doc['label'])} are ready: "
-         f"<b>{len(e['rows'])} charges, ${tot:,.2f}</b>. Tap &#9873; Flag on anything that needs review, then tap Submit.</p>"
-         f"<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;border-collapse:collapse;border:1px solid #d9dde3'>"
-         f"<tr><th style='{TH}'>Date</th><th style='{TH}'>Description</th><th style='{TH}'>Company</th><th style='{TH}' align='right'>Amount</th><th style='{TH}' align='center'>Flag</th></tr>{rows}"
-         f"<tr><td colspan='3' style='padding:14px 12px;font-size:16px;font-weight:bold'>Total ({len(e['rows'])} charges)</td>"
-         f"<td style='padding:14px 12px;font-size:16px;font-weight:bold' align='right'>${tot:,.2f}</td><td></td></tr></table>"
-         f"<div style='text-align:center;margin:24px 0'><a href='{esc(url)}?do=submit' style='{BTN}'>Submit</a></div>"
-         "<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;border-top:2px solid #d9dde3;font-size:15px'><tr><td style='padding-top:14px'>"
-         "<p style='font-weight:bold;font-size:17px;margin:0 0 10px'>Key</p>"
-         "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#b38f00'>&#9873; Flag</span>Needs review before the bill is paid.</p>"
-         "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#2e7d32'>Submit</span>Approves all unflagged charges on this chart.</p></td></tr></table>"
+         "<p style='font-size:16px;margin:0 0 18px'>Your American Express charges are ready to review. Open your page, tap &#9873; Flag on anything that needs review, then tap Submit.</p>"
+         f"<div style='text-align:center;margin:24px 0'><a href='{esc(url)}' style='{BTN}'>Open my charges</a></div>"
          "<p style='font-size:14px;margin-top:20px'>Chris AI<br>Cox Research, Assistant<br>2252780616<br>Littledude@coxresearch.com<br><br>https://coxresearch.com</p></td></tr></table>")
+    subject = f"{e['first']}'s Amex charges"
+    open(os.path.join(outdir, e['id'] + '.subject.txt'), 'w').write(subject)
     fn = os.path.join(outdir, e['id'] + '.html'); open(fn, 'w').write(h)
-    assert 'mailto' not in h and 'do=submit' in h and 'do=flag' in h
+    assert 'mailto' not in h and h.count(url) == 1
     print(e['id'], len(e['rows']), f'{tot:.2f}', url, fn)
