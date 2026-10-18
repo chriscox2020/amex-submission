@@ -191,7 +191,17 @@ def view(token):
     if not doc: abort(404)
     flags, sub = state(doc['stmt'], e['id'])
     append({'type': 'open', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta()})
-    return Response(render(doc, e, token, flags, sub), headers={'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex'})
+    page = render(doc, e, token, flags, sub)
+    act = request.args.get('do', ''); row = request.args.get('row', '')
+    if not sub and act == 'flag' and row.isdigit() and int(row) not in flags:
+        js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
+              f"fetch('/v/{token}/flag/{int(row)}',{{method:'POST',headers:{{'Accept':'application/json'}}}}).then(function(){{location.replace('/v/{token}')}})}});</script>")
+        page = page.replace('</body>', js + '</body>')
+    elif not sub and act == 'submit':
+        js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
+              f"var f=document.createElement('form');f.method='post';f.action='/v/{token}/submit';document.body.appendChild(f);f.submit()}});</script>")
+        page = page.replace('</body>', js + '</body>')
+    return Response(page, headers={'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex'})
 
 @app.post('/v/<token>/flag/<int:row>')
 def flag(token, row):
