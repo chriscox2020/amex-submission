@@ -1,0 +1,46 @@
+# Render Blueprint - Cox Research Amex employee verification page
+# Paid Starter web service (~$7/mo) + 1 GB persistent disk (~$0.25/mo).
+services:
+  - type: web
+    name: amex-submission
+    runtime: python
+    plan: starter
+    region: ohio
+    buildCommand: pip install -r requirements.txt
+    # 1 worker (locks + append-only log are per-process), several threads
+    startCommand: gunicorn app:app --workers 1 --threads 8 --bind 0.0.0.0:$PORT --timeout 60
+    healthCheckPath: /healthz
+    autoDeploy: false
+    disk:
+      name: amex-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATA_DIR
+        value: /var/data
+      - key: PUBLIC_BASE
+        value: https://amex.coxresearch.com
+      - key: TOKEN_SECRET          # signs the per-employee links; never change after links go out
+        generateValue: true
+      - key: ADMIN_PASSWORD        # Chris-only /admin and /admin/log.csv
+        generateValue: true
+      - key: EMAIL_MODE            # dryrun until the mail credential is in, then smtp (or resend)
+        value: dryrun
+      - key: RECORD_TO
+        value: littledude@coxresearch.com
+      - key: RECORD_CC             # optional, e.g. chris@coxresearch.com
+        value: ""
+      - key: MAIL_FROM
+        value: Chris AI <littledude@coxresearch.com>
+      - key: SMTP_HOST
+        value: smtp.office365.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: littledude@coxresearch.com
+      - key: SMTP_PASSWORD         # entered by Chris in the Render dashboard, never in chat
+        sync: false
+      - key: RESEND_API_KEY        # only if EMAIL_MODE=resend
+        sync: false

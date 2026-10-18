@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+local-data/
+out/
+screenshots/
+# statement data stays OFF GitHub; it is uploaded to the Render disk via /admin/upload
+statements/*.json
+tests/*.txt
