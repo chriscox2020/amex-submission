@@ -13,6 +13,7 @@ os.environ['ADMIN_PASSWORD'] = 'local-admin'
 os.environ['EMAIL_MODE'] = 'dryrun'
 os.environ['RECORD_TO'] = 'other@example.com'
 os.environ['RECORD_CC'] = ''
+os.environ['MEGHAN_EMAIL'] = 'meghan@coxresearch.com'
 os.environ['PUBLIC_BASE'] = 'http://127.0.0.1:10077'
 os.environ['MAIL_FROM'] = 'Chris AI <littledude@coxresearch.com>'
 
@@ -468,6 +469,164 @@ class SummaryTest(unittest.TestCase):
         log_body = opened.get_data(as_text=True)
         self.assertIn(ada_note, log_body)
         self.assertIn(ben_note, log_body)
+
+    def outbox(self):
+        paths = sorted(pathlib.Path(app.OUTBOX).glob('*.eml'))
+        return [email.message_from_bytes(path.read_bytes()) for path in paths]
+
+    def addressed(self, addr):
+        return [msg for msg in self.outbox() if ''.join(str(msg['To'] or '').splitlines()) == addr]
+
+    def test_pending_json_lists_names_only(self):
+        self.assertEqual(self.client.get('/admin/pending.json').status_code, 401)
+        self.assertEqual(self.auth_get('/admin/pending.json', user='Pat').status_code, 403)
+        newest = self.auth_get('/admin/pending.json')
+        self.assertEqual(newest.status_code, 200)
+        body = newest.get_json()
+        self.assertEqual(body['statement'], max(app.load_statements()))
+        self.assertEqual(set(body), {'statement', 'month', 'not_submitted', 'submitted', 'total'})
+        self.assertNotIn('@', newest.get_data(as_text=True))
+        asked = self.auth_get(f'/admin/pending.json?stmt={AUG}', user='Meghan')
+        self.assertEqual(asked.status_code, 200)
+        pending = asked.get_json()
+        self.assertEqual(pending['statement'], AUG)
+        self.assertEqual(pending['month'], 'August 2026')
+        self.assertEqual(pending['submitted'], 0)
+        self.assertEqual(pending['total'], 2)
+        self.assertEqual(sorted(item['id'] for item in pending['not_submitted']), ['ada', 'ben'])
+        self.assertEqual({item['name'] for item in pending['not_submitted']}, {'Ada', 'Ben'})
+        self.assertNotIn('CAFE', asked.get_data(as_text=True))
+        self.assertNotIn('SHOP', asked.get_data(as_text=True))
+        self.assertEqual(self.auth_get('/admin/pending.json?stmt=1999-01-01').status_code, 404)
+        self.submit_employee(self.ada)
+        after = self.auth_get(f'/admin/pending.json?stmt={AUG}').get_json()
+        self.assertEqual(after['submitted'], 1)
+        self.assertEqual(after['not_submitted'], [{'name': 'Ben', 'id': 'ben'}])
+
+    def test_owner_summary_emails_once_when_everyone_is_in(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.assertEqual(self.addressed('chris@coxresearch.com'), [])
+        self.assertEqual(self.addressed('meghan@coxresearch.com'), [])
+        self.assertEqual(len(self.addressed('other@example.com')), 1)
+        self.assertIsNone(self.addressed('other@example.com')[0]['Cc'])
+        self.submit_employee(self.ben)
+        chris = self.addressed('chris@coxresearch.com')
+        meghan = self.addressed('meghan@coxresearch.com')
+        self.assertEqual(len(chris), 1)
+        self.assertEqual(len(meghan), 1)
+        self.assertEqual(''.join(str(chris[0]['Subject']).splitlines()),
+                         'All submitted: American Express charges August 2026')
+        self.assertEqual(chris[0]['Subject'], meghan[0]['Subject'])
+        text = chris[0].get_payload()
+        if chris[0].is_multipart():
+            text = next(part.get_payload(decode=True).decode() for part in chris[0].walk()
+                        if part.get_content_type() == 'text/plain')
+        self.assertIn('Entertainment: $5.00', text)
+        self.assertIn('Grand total: $17.50', text)
+        self.assertIn('Statement total: $17.50', text)
+        self.assertIn('http://127.0.0.1:10077/admin/summary/2026-08-22', text)
+        self.assertNotIn('does not equal', text)
+        self.assertNotIn('Ada', text)
+        self.assertNotIn('Ben', text)
+        self.assertNotIn('CAFE', text)
+        self.assertNotIn('SHOP', text)
+        self.assertEqual([part.get_filename() for part in chris[0].walk() if part.get_filename()], [])
+        notice = [r for r in app.read_log() if r.get('type') == 'all_submitted_notice']
+        self.assertEqual(len(notice), 1)
+        self.assertEqual(notice[0]['to'], ['chris@coxresearch.com', 'meghan@coxresearch.com'])
+        self.client.post(f'/v/{self.ben}/submit')
+        self.assertEqual(len(self.addressed('chris@coxresearch.com')), 1)
+        self.assertEqual(len(self.addressed('meghan@coxresearch.com')), 1)
+        self.client.post(f'/admin/reset/{AUG}/ben', auth=('Chris', 'local-admin'))
+        self.submit_employee(self.ben)
+        self.assertEqual(len(self.addressed('chris@coxresearch.com')), 1)
+        self.assertEqual(len(self.addressed('other@example.com')), 3)
+        built = summary.build_summary(app.load_statements()[AUG], app.state)
+        built['difference_cents'] = 350
+        built['summary_cents'] = 1400
+        warning, _html = app.owner_summary_bodies(built)
+        self.assertIn('Summary total $14.00 does not equal the statement total $17.50. Difference: $3.50.', warning)
+
+    def test_admin_approve_and_pending_email(self):
+        self.assertEqual(self.client.post(f'/admin/summary/{AUG}/approve/ben').status_code, 401)
+        self.assertEqual(self.auth_post(f'/admin/summary/{AUG}/approve/ben', user='Meghan').status_code, 403)
+        self.assertEqual(self.auth_get(f'/admin/summary/{AUG}/approve/ben', user='Meghan').status_code, 403)
+        confirm = self.auth_get(f'/admin/summary/{AUG}/approve/ben')
+        self.assertEqual(confirm.status_code, 200)
+        page = confirm.get_data(as_text=True)
+        self.assertIn("Approve Ben's charges", page)
+        self.assertIn(f"action='/admin/summary/{AUG}/approve/ben'", page)
+        self.assertIn("id='approve'", page)
+        self.submit_employee(self.ada)
+        refused = self.auth_post(f'/admin/summary/{AUG}/approve/ada')
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.get_json()['error'], 'already submitted')
+        self.assertEqual(self.addressed('chris@coxresearch.com'), [])
+        before = len(self.outbox())
+        approved = self.auth_post(f'/admin/summary/{AUG}/approve/ben')
+        self.assertEqual(approved.status_code, 303)
+        rec = next(r for r in app.read_log() if r.get('type') == 'admin_approve')
+        self.assertEqual(rec['by'], 'Chris')
+        self.assertEqual(rec['emp_id'], 'ben')
+        self.assertEqual(rec['note'], "Approved by Chris on employee's behalf")
+        self.assertEqual(rec['flagged'], [])
+        self.assertEqual(rec['ts'], FROZEN)
+        summary_page = self.page()
+        self.assertIn('Approved by Chris Oct 21, 2026 9:30 AM CT', summary_page)
+        self.assertEqual(self.addressed('ben@coxresearch.com'), [])
+        self.assertEqual(len(self.outbox()), before + 2)
+        self.assertEqual(len(self.addressed('chris@coxresearch.com')), 1)
+        self.assertEqual(len(self.addressed('meghan@coxresearch.com')), 1)
+        pending = self.auth_get(f'/admin/pending.json?stmt={AUG}').get_json()
+        self.assertEqual(pending['not_submitted'], [])
+        self.assertEqual(pending['submitted'], 2)
+        again = self.auth_post(f'/admin/summary/{AUG}/approve/ben')
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(again.get_json()['error'], 'already submitted')
+        self.assertEqual(len([r for r in app.read_log() if r.get('type') == 'admin_approve']), 1)
+        ben_page = self.client.get(f'/v/{self.ben}').get_data(as_text=True)
+        self.assertNotIn('Submit to QuickBooks for Pay', ben_page)
+        self.assertNotIn('/admin', ben_page)
+        self.assertNotIn("id='approve'", ben_page)
+
+    def test_pending_email_and_month_lock(self):
+        sent = self.auth_post(f'/admin/summary/{AUG}/pending-email', user='Meghan')
+        self.assertEqual(sent.status_code, 200)
+        msgs = self.addressed('chris@coxresearch.com')
+        self.assertEqual(len(msgs), 1)
+        msg = msgs[0]
+        self.assertEqual(''.join(str(msg['Subject']).splitlines()), 'Amex August 2026: not yet submitted')
+        self.assertEqual(msg['Reply-To'], 'littledude@mail.grokbot.com')
+        self.assertEqual(msg['From'], 'Chris AI <littledude@coxresearch.com>')
+        self.assertIsNone(msg['Cc'])
+        self.assertEqual(self.addressed('meghan@coxresearch.com'), [])
+        text = next(part.get_payload(decode=True).decode() for part in msg.walk()
+                    if part.get_content_type() == 'text/plain')
+        self.assertIn('Ada', text)
+        self.assertIn('Ben', text)
+        self.assertIn("Approve Ada's charges: http://127.0.0.1:10077/admin/summary/2026-08-22/approve/ada", text)
+        self.assertIn("Approve Ben's charges: http://127.0.0.1:10077/admin/summary/2026-08-22/approve/ben", text)
+        self.assertIn('Or reply APPROVE Ada (or APPROVE ALL).', text)
+        self.assertIn('Or reply APPROVE Ben (or APPROVE ALL).', text)
+        self.assertNotIn('CAFE', text)
+        self.assertNotIn('SHOP', text)
+        employee = self.client.get(f'/v/{self.ada}').get_data(as_text=True)
+        self.assertNotIn("Approve Ada's charges", employee)
+        self.assertIn('>Submit</button>', employee)
+        self.assertIn('>Print</button>', employee)
+        self.submit_employee(self.ada)
+        self.auth_post(f'/admin/summary/{AUG}/pending-email', user='Chris')
+        texts = []
+        for msg in self.addressed('chris@coxresearch.com'):
+            texts.append(next(part.get_payload(decode=True).decode() for part in msg.walk()
+                              if part.get_content_type() == 'text/plain'))
+        self.assertTrue(any('Approve Ada' not in body and 'Or reply APPROVE Ben (or APPROVE ALL).' in body
+                            for body in texts))
+        app.append({'type': 'qb_submit', 'stmt': AUG, 'by': 'Chris', 'ts': FROZEN})
+        locked = self.auth_post(f'/admin/summary/{AUG}/approve/ben')
+        self.assertEqual(locked.status_code, 409)
+        self.assertEqual(locked.get_json()['error'], 'month locked')
+        self.assertEqual([r for r in app.read_log() if r.get('type') == 'admin_approve'], [])
 
     def test_no_service_credentials(self):
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()
