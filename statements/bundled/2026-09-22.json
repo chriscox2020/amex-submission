@@ -1,0 +1,600 @@
+{
+ "stmt": "2026-09-22",
+ "label": "Sep 22, 2026 statement",
+ "due": "Due by the first",
+ "bundle_rev": 1,
+ "employees": [
+  {
+   "id": "chris-cox",
+   "name": "Chris Cox",
+   "first": "Chris",
+   "email": "chris@coxresearch.com",
+   "send_to": "chris@coxresearch.com",
+   "rows": [
+    {
+     "id": 1,
+     "date": "08/24/2026",
+     "category": "Restaurant",
+     "company": "TST* WALK-ONS - JUBADENHAM SPRINGS LA",
+     "amount": 203.35
+    },
+    {
+     "id": 2,
+     "date": "08/24/2026",
+     "category": "Business Services",
+     "company": "UPS* 800-811-1648 GA",
+     "amount": 180.96
+    },
+    {
+     "id": 3,
+     "date": "08/24/2026",
+     "category": "Other",
+     "company": "WEB*NETWORK SOLUTION888-642-9675 FL",
+     "amount": 11.99
+    },
+    {
+     "id": 4,
+     "date": "08/25/2026",
+     "category": "Restaurant",
+     "company": "ISABELLAS PIZZERIA 6BATON ROUGE LA",
+     "amount": 135.86
+    },
+    {
+     "id": 5,
+     "date": "08/26/2026",
+     "category": "Restaurant",
+     "company": "LOS REYES - COURSEY BATON ROUGE LA",
+     "amount": 180.17
+    },
+    {
+     "id": 6,
+     "date": "08/26/2026",
+     "category": "Transportation",
+     "company": "TMNA SUBSCRIPTION PLANO TX",
+     "amount": 16.58
+    },
+    {
+     "id": 7,
+     "date": "08/27/2026",
+     "category": "Other",
+     "company": "GODADDY#7028344243 Tempe AZ",
+     "amount": 119.21
+    },
+    {
+     "id": 8,
+     "date": "08/27/2026",
+     "category": "Merchandise & Supplies",
+     "company": "INTUIT QUICKBOOKS 800-446-8848 CA",
+     "amount": 127.08
+    },
+    {
+     "id": 9,
+     "date": "08/28/2026",
+     "category": "Merchandise & Supplies",
+     "company": "LOWE'S BATON ROUGE LA",
+     "amount": 105.93
+    },
+    {
+     "id": 10,
+     "date": "08/28/2026",
+     "category": "Business Services",
+     "company": "PAYPAL *DOZIERTECHG 4029357733 LA",
+     "amount": 2850.0
+    },
+    {
+     "id": 11,
+     "date": "08/28/2026",
+     "category": "Transportation",
+     "company": "TESLA, INC. SUBSCRIPPALO ALTO CA",
+     "amount": 11.04
+    },
+    {
+     "id": 12,
+     "date": "08/29/2026",
+     "category": "Business Services",
+     "company": "DAKBOARD LAS VEGAS NV",
+     "amount": 10.0
+    },
+    {
+     "id": 13,
+     "date": "08/29/2026",
+     "category": "Restaurant",
+     "company": "TST* CRUST PIZZA - BBATON ROUGE LA",
+     "amount": 129.24
+    },
+    {
+     "id": 14,
+     "date": "08/31/2026",
+     "category": "Merchandise & Supplies",
+     "company": "AMAZON MARKEPLACE NA PA",
+     "amount": 163.53
+    },
+    {
+     "id": 15,
+     "date": "08/31/2026",
+     "category": "Merchandise & Supplies",
+     "company": "LOUISIANA NURSERY-COBATON ROUGE LA",
+     "amount": 566.68
+    },
+    {
+     "id": 16,
+     "date": "08/31/2026",
+     "category": "Transportation",
+     "company": "O'REILLY AUTO PARTS BATON ROUGE LA",
+     "amount": 71.25
+    },
+    {
+     "id": 17,
+     "date": "08/31/2026",
+     "category": "Restaurant",
+     "company": "TST* THE RUBY SLIPPEBATON ROUGE LA",
+     "amount": 68.78
+    },
+    {
+     "id": 18,
+     "date": "08/31/2026",
+     "category": "Business Services",
+     "company": "UPS* 800-811-1648 GA",
+     "amount": 316.68
+    },
+    {
+     "id": 19,
+     "date": "09/01/2026",
+     "category": "Business Services",
+     "company": "BENNYS COURSEY BATON ROUGE LA",
+     "amount": 19.99
+    },
+    {
+     "id": 20,
+     "date": "09/01/2026",
+     "category": "Restaurant",
+     "company": "J ALEXANDER'S BATON ROUGE LA",
+     "amount": 207.96
+    },
+    {
+     "id": 21,
+     "date": "09/02/2026",
+     "category": "Business Services",
+     "company": "AplPay GOAT PROFESSIBATON ROUGE LA",
+     "amount": 120.0
+    },
+    {
+     "id": 22,
+     "date": "09/02/2026",
+     "category": "Restaurant",
+     "company": "BLUE IGUANA OF BATONBATON ROUGE LA",
+     "amount": 190.48
+    },
+    {
+     "id": 23,
+     "date": "09/02/2026",
+     "category": "Business Services",
+     "company": "FEDEX - EXPRESS 800-622-1147 TN",
+     "amount": 96.31
+    },
+    {
+     "id": 24,
+     "date": "09/03/2026",
+     "category": "Merchandise & Supplies",
+     "company": "INTUIT QUICKBOOKS 800-446-8848 CA",
+     "amount": 375.7
+    },
+    {
+     "id": 25,
+     "date": "09/03/2026",
+     "category": "Restaurant",
+     "company": "ISABELLAS PIZZERIA 6BATON ROUGE LA",
+     "amount": 174.74
+    },
+    {
+     "id": 26,
+     "date": "09/04/2026",
+     "category": "Restaurant",
+     "company": "DEMPSEYS 06888002181BATON ROUGE LA",
+     "amount": 161.78
+    },
+    {
+     "id": 27,
+     "date": "09/04/2026",
+     "category": "Transportation",
+     "company": "SHELL SERVICE STATIOBATON ROUGE LA",
+     "amount": 110.36
+    },
+    {
+     "id": 28,
+     "date": "09/04/2026",
+     "category": "Business Services",
+     "company": "VENMO *JENNIFER LONG8558124430 NY",
+     "amount": 1545.0
+    },
+    {
+     "id": 29,
+     "date": "09/05/2026",
+     "category": "Merchandise & Supplies",
+     "company": "LOWE'S BATON ROUGE LA",
+     "amount": 77.28
+    },
+    {
+     "id": 30,
+     "date": "09/06/2026",
+     "category": "Merchandise & Supplies",
+     "company": "AMAZON MARKEPLACE NA PA",
+     "amount": 43.04
+    },
+    {
+     "id": 31,
+     "date": "09/06/2026",
+     "category": "Merchandise & Supplies",
+     "company": "APPLE.COM/BILL INTERNET CHARGE CA",
+     "amount": 2.2
+    },
+    {
+     "id": 32,
+     "date": "09/06/2026",
+     "category": "Business Services",
+     "company": "BENNYS COURSEY BATON ROUGE LA",
+     "amount": 19.99
+    },
+    {
+     "id": 33,
+     "date": "09/07/2026",
+     "category": "Restaurant",
+     "company": "BLUE IGUANA OF BATONBATON ROUGE LA",
+     "amount": 123.47
+    },
+    {
+     "id": 34,
+     "date": "09/07/2026",
+     "category": "Business Services",
+     "company": "FEDEX532908452 FederMEMPHIS TN",
+     "amount": 24.18
+    },
+    {
+     "id": 35,
+     "date": "09/07/2026",
+     "category": "Merchandise & Supplies",
+     "company": "MICROSOFT MSBILL.INFO",
+     "amount": 11.04
+    },
+    {
+     "id": 36,
+     "date": "09/07/2026",
+     "category": "Communications",
+     "company": "STARLINK INTERNET HAWTHORNE CA",
+     "amount": 130.0
+    },
+    {
+     "id": 37,
+     "date": "09/07/2026",
+     "category": "Business Services",
+     "company": "UPS* 800-811-1648 GA",
+     "amount": 257.89
+    },
+    {
+     "id": 38,
+     "date": "09/08/2026",
+     "category": "Merchandise & Supplies",
+     "company": "AMAZON MARKEPLACE NA PA",
+     "amount": 44.18
+    },
+    {
+     "id": 39,
+     "date": "09/08/2026",
+     "category": "Restaurant",
+     "company": "BLUE IGUANA OF BATONBATON ROUGE LA",
+     "amount": 163.75
+    },
+    {
+     "id": 40,
+     "date": "09/09/2026",
+     "category": "Entertainment",
+     "company": "30405 CLUB4 FITNESS BATON ROUGE LA",
+     "amount": 29.0
+    },
+    {
+     "id": 41,
+     "date": "09/09/2026",
+     "category": "Merchandise & Supplies",
+     "company": "APPLE.COM/BILL INTERNET CHARGE CA",
+     "amount": 1.65
+    },
+    {
+     "id": 42,
+     "date": "09/09/2026",
+     "category": "Restaurant",
+     "company": "DONS SEAFOOD HUT OF DENHAM SPRINGS LA",
+     "amount": 135.8
+    },
+    {
+     "id": 43,
+     "date": "09/09/2026",
+     "category": "Communications",
+     "company": "SPOTIFY USA NEW YORK NY",
+     "amount": 14.35
+    },
+    {
+     "id": 44,
+     "date": "09/10/2026",
+     "category": "Restaurant",
+     "company": "ELISAS CUBAN CUISINEBATON ROUGE LA",
+     "amount": 78.9
+    },
+    {
+     "id": 45,
+     "date": "09/10/2026",
+     "category": "Other",
+     "company": "GODADDY#4160661681= Tempe AZ",
+     "amount": 185.94
+    },
+    {
+     "id": 46,
+     "date": "09/10/2026",
+     "category": "Business Services",
+     "company": "MICHAEL R CHOATE CPABATON ROUGE LA",
+     "amount": 4575.0
+    },
+    {
+     "id": 47,
+     "date": "09/12/2026",
+     "category": "Merchandise & Supplies",
+     "company": "APPLE.COM/BILL INTERNET CHARGE CA",
+     "amount": 8.83
+    },
+    {
+     "id": 48,
+     "date": "09/12/2026",
+     "category": "Restaurant",
+     "company": "AplPay STARBUCKS STOBATON ROUGE LA",
+     "amount": 77.0
+    },
+    {
+     "id": 49,
+     "date": "09/12/2026",
+     "category": "Restaurant",
+     "company": "AplPay STARBUCKS STOBATON ROUGE LA",
+     "amount": 127.0
+    },
+    {
+     "id": 50,
+     "date": "09/12/2026",
+     "category": "Business Services",
+     "company": "VENMO *DEVIN BIOSSAT8558124430 NY",
+     "amount": 128.75
+    },
+    {
+     "id": 51,
+     "date": "09/14/2026",
+     "category": "Business Services",
+     "company": "FEDEX533449289 FederMEMPHIS TN",
+     "amount": 24.13
+    },
+    {
+     "id": 52,
+     "date": "09/14/2026",
+     "category": "Restaurant",
+     "company": "GEISHA \"SUSHI WITH ADenham Springs LA",
+     "amount": 52.42
+    },
+    {
+     "id": 53,
+     "date": "09/14/2026",
+     "category": "Business Services",
+     "company": "UPS* 800-811-1648 GA",
+     "amount": 250.85
+    },
+    {
+     "id": 54,
+     "date": "09/15/2026",
+     "category": "Transportation",
+     "company": "AUTOZONE #3868 00000BATON ROUGE LA",
+     "amount": -24.31
+    },
+    {
+     "id": 55,
+     "date": "09/15/2026",
+     "category": "Transportation",
+     "company": "AUTOZONE #3868 00000BATON ROUGE LA",
+     "amount": 267.4
+    },
+    {
+     "id": 56,
+     "date": "09/15/2026",
+     "category": "Restaurant",
+     "company": "BLUE IGUANA OF BATONBATON ROUGE LA",
+     "amount": 287.75
+    },
+    {
+     "id": 57,
+     "date": "09/16/2026",
+     "category": "Business Services",
+     "company": "ANSER GREEN BAY WI",
+     "amount": 100.0
+    },
+    {
+     "id": 58,
+     "date": "09/16/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 13.81
+    },
+    {
+     "id": 59,
+     "date": "09/16/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 15.48
+    },
+    {
+     "id": 60,
+     "date": "09/16/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 16.3
+    },
+    {
+     "id": 61,
+     "date": "09/17/2026",
+     "category": "Restaurant",
+     "company": "THE BACK PORCH DESTIN FL",
+     "amount": 121.59
+    },
+    {
+     "id": 62,
+     "date": "09/17/2026",
+     "category": "Transportation",
+     "company": "UBER",
+     "amount": 12.93
+    },
+    {
+     "id": 63,
+     "date": "09/17/2026",
+     "category": "Transportation",
+     "company": "UBER",
+     "amount": 13.55
+    },
+    {
+     "id": 64,
+     "date": "09/17/2026",
+     "category": "Transportation",
+     "company": "UBER",
+     "amount": 15.16
+    },
+    {
+     "id": 65,
+     "date": "09/18/2026",
+     "category": "Merchandise & Supplies",
+     "company": "ARLO TECHNOLOGIES INCARLSBAD CA",
+     "amount": 22.09
+    },
+    {
+     "id": 66,
+     "date": "09/18/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 12.05
+    },
+    {
+     "id": 67,
+     "date": "09/19/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 18.86
+    },
+    {
+     "id": 68,
+     "date": "09/19/2026",
+     "category": "Transportation",
+     "company": "TESLA INC SUPERCHARGPALO ALTO",
+     "amount": 31.91
+    },
+    {
+     "id": 69,
+     "date": "09/21/2026",
+     "category": "Merchandise & Supplies",
+     "company": "GOOGLE *YOUTUBEPREMIG.CO/HELPPAY# CA",
+     "amount": 17.67
+    },
+    {
+     "id": 70,
+     "date": "09/21/2026",
+     "category": "Restaurant",
+     "company": "TST* BREW-BACHERS GRBATON ROUGE LA",
+     "amount": 165.99
+    },
+    {
+     "id": 71,
+     "date": "09/21/2026",
+     "category": "Business Services",
+     "company": "UPS* 800-811-1648 GA",
+     "amount": 936.09
+    },
+    {
+     "id": 72,
+     "date": "09/21/2026",
+     "category": "Other",
+     "company": "WEB*NETWORK SOLUTION888-642-9675 FL",
+     "amount": 11.99
+    },
+    {
+     "id": 73,
+     "date": "09/22/2026",
+     "category": "Merchandise & Supplies",
+     "company": "MICROSOFT MSBILL.INFO",
+     "amount": 110.49
+    }
+   ]
+  },
+  {
+   "id": "alice-cox",
+   "name": "Alice E Cox",
+   "first": "Alice",
+   "email": "chris@coxresearch.com",
+   "send_to": "chris@coxresearch.com",
+   "rows": [
+    {
+     "id": 1,
+     "date": "08/23/2026",
+     "category": "Restaurant",
+     "company": "TST* ON THE HALF SHEPRAIRIEVILLE LA",
+     "amount": 100.74
+    },
+    {
+     "id": 2,
+     "date": "08/26/2026",
+     "category": "Restaurant",
+     "company": "GEORGES O NEAL GEORGBATON ROUGE LA",
+     "amount": 55.99
+    },
+    {
+     "id": 3,
+     "date": "08/28/2026",
+     "category": "Restaurant",
+     "company": "AplPay SMOOTHIE KINGBATON ROUGE LA",
+     "amount": 9.82
+    },
+    {
+     "id": 4,
+     "date": "08/28/2026",
+     "category": "Restaurant",
+     "company": "JOVI'S TACOS BATON ROUGE LA",
+     "amount": 27.08
+    },
+    {
+     "id": 5,
+     "date": "09/02/2026",
+     "category": "Restaurant",
+     "company": "ALBASHA GREEK & LEBAWALKER LA",
+     "amount": 103.81
+    },
+    {
+     "id": 6,
+     "date": "09/09/2026",
+     "category": "Restaurant",
+     "company": "ALBASHA GREEK LEBANBATON ROUGE LA",
+     "amount": 43.47
+    },
+    {
+     "id": 7,
+     "date": "09/16/2026",
+     "category": "Restaurant",
+     "company": "AHUUAS MEXICAN RESTABATON ROUGE LA",
+     "amount": 50.37
+    },
+    {
+     "id": 8,
+     "date": "09/17/2026",
+     "category": "Restaurant",
+     "company": "GEISHA \"SUSHI WITH APrairieville LA",
+     "amount": 56.02
+    },
+    {
+     "id": 9,
+     "date": "09/19/2026",
+     "category": "Restaurant",
+     "company": "TST* BISTRO ITALIA -BATON ROUGE LA",
+     "amount": 33.32
+    }
+   ]
+  }
+ ]
+}

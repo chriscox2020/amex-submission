@@ -1,12 +1,14 @@
 """Cox Research - American Express employee verification page.
 One page per employee per statement, reached by an unguessable token link.
-  Flag   = click opens an optional note (Save/Cancel, 500 characters). Save
-           toggles the row on and stores the note with the flag; clicking a
-           flagged row again clears it. "Needs review before the bill is paid."
+  Flag   = the red button opens a Note/Reason popup (five presets plus a typed
+           note, 500 characters). Save stores the note, flags the row, closes
+           the popup, and moves to the next charge. Clicking a flagged row
+           again clears it. Credits cannot be flagged or recategorized.
   Submit = one click, approves all unflagged rows, appends to the log on the
            persistent disk, and emails a record to RECORD_TO automatically.
            Each flagged line is charge date, merchant, amount, flagged date,
            reference (or "ref pending"), then the note.
+Charge review stays in this app. Submitting writes the log and the record email only.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
 from datetime import datetime
@@ -22,8 +24,19 @@ TOKEN_SECRET = os.environ.get('TOKEN_SECRET', '')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
 PUBLIC_BASE = os.environ.get('PUBLIC_BASE', 'https://amex.coxresearch.com').rstrip('/')
 EMAIL_MODE = os.environ.get('EMAIL_MODE', 'dryrun')          # dryrun | smtp | resend
-RECORD_TO = os.environ.get('RECORD_TO', 'littledude@coxresearch.com')
+# Submission records. A stale littledude@coxresearch.com env value is rewritten
+# so the live service still delivers to this address.
+RECORD_ADDRESS = 'littledude@mail.grokbot.com'
+def normalize_record_to(raw):
+    raw = (raw or '').strip()
+    if raw in ('', 'littledude@coxresearch.com'):
+        return RECORD_ADDRESS
+    return raw
+RECORD_TO = normalize_record_to(os.environ.get('RECORD_TO', ''))
 RECORD_CC = os.environ.get('RECORD_CC', '')                   # optional, e.g. chris@coxresearch.com
+# PERMANENT (Chris, Oct 21 2026): Alice E Cox's page link and verification email
+# ALWAYS go to this address, never alice@. Do not change on go-live or later.
+ALICE_SEND_TO = 'chris@coxresearch.com'
 MAIL_FROM = os.environ.get('MAIL_FROM', 'Chris AI <littledude@coxresearch.com>')
 TZ = ZoneInfo('America/Chicago')
 LOCK = threading.Lock()
@@ -32,15 +45,76 @@ app = Flask(__name__)
 os.makedirs(OUTBOX, exist_ok=True)
 
 # ---------- statements & tokens ----------
-def load_statements():
-    """Repo statements/ plus any uploaded to DATA_DIR/statements (disk wins)."""
+def bundle_rev(doc):
+    try:
+        return int((doc or {}).get('bundle_rev') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def _norm_name(value):
+    return ' '.join(str(value or '').upper().split())
+
+def is_alice(emp):
+    """Alice E Cox, matched by id or name. Not a substring of any other person."""
+    if not isinstance(emp, dict):
+        return False
+    if str(emp.get('id') or '').lower() == 'alice-cox':
+        return True
+    return _norm_name(emp.get('name')) in ('ALICE E COX', 'ALICE COX')
+
+def lock_routing(doc):
+    """Force Alice's send-to. An uploaded email of alice@ cannot override this."""
+    if not isinstance(doc, dict):
+        return doc
+    for e in doc.get('employees') or []:
+        if is_alice(e):
+            e['email'] = ALICE_SEND_TO
+            e['send_to'] = ALICE_SEND_TO
+    return doc
+
+def _load_stmt_dir(d):
+    """JSON files directly in d. Subdirectories (statements/bundled) are separate."""
     out = {}
-    for d in (os.path.join(APP_DIR, 'statements'), os.path.join(DATA_DIR, 'statements')):
-        if os.path.isdir(d):
-            for f in sorted(os.listdir(d)):
-                if f.endswith('.json'):
-                    doc = json.load(open(os.path.join(d, f)))
-                    out[doc['stmt']] = doc
+    if not os.path.isdir(d):
+        return out
+    for f in sorted(os.listdir(d)):
+        path = os.path.join(d, f)
+        if f.endswith('.json') and os.path.isfile(path):
+            with open(path) as fh:
+                doc = json.load(fh)
+            if isinstance(doc, dict) and doc.get('stmt'):
+                out[doc['stmt']] = doc
+    return out
+
+def load_statements():
+    """Bundled, repo, and disk statements. The highest bundle_rev wins.
+
+    A disk file with no bundle_rev (0) loses to the bundled Sep 22 statement,
+    and that bundled copy is written onto the disk so the next boot agrees.
+    /admin/upload sets a higher bundle_rev, so a later upload still wins.
+    """
+    bundled = _load_stmt_dir(os.path.join(APP_DIR, 'statements', 'bundled'))
+    repo = _load_stmt_dir(os.path.join(APP_DIR, 'statements'))
+    disk_dir = os.path.join(DATA_DIR, 'statements')
+    disk = _load_stmt_dir(disk_dir)
+    out = {}
+    for key in set(bundled) | set(repo) | set(disk):
+        cands = []
+        for i, src in enumerate((bundled.get(key), repo.get(key), disk.get(key))):
+            if src:
+                cands.append((bundle_rev(src), i, src))
+        chosen = cands[-1][2]
+        b = bundled.get(key)
+        if b and bundle_rev(b) > bundle_rev(disk.get(key)):
+            chosen = b
+            lock_routing(chosen)
+            os.makedirs(disk_dir, exist_ok=True)
+            with open(os.path.join(disk_dir, key + '.json'), 'w') as fh:
+                json.dump(chosen, fh, indent=1)
+                fh.write('\n')
+        else:
+            lock_routing(chosen)
+        out[key] = chosen
     return out
 
 def make_token(stmt, emp_id):
@@ -90,7 +164,26 @@ def state(stmt, emp_id):
     return flags, submitted, comment, categories
 
 # ---------- email ----------
-def money(a): return f'${a:,.2f}'
+def money(a): return f'${float(a):,.2f}'
+
+def money_signed(a):
+    a = float(a)
+    if a < 0:
+        return '&minus;' + money(abs(a))
+    return money(a)
+
+def sorted_rows(rows):
+    def key(r):
+        try:
+            dt = datetime.strptime(str(r.get('date') or ''), '%m/%d/%Y')
+        except Exception:
+            dt = datetime.min
+        try:
+            rid = int(r.get('id') or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        return (dt, rid)
+    return sorted(rows, key=key)
 
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
@@ -169,9 +262,27 @@ def posted_field(name):
         return request.form.get(name)
     return None
 
+FLAG_REASONS = ('Wrong category', 'Wrong price', 'Duplicate charge', 'Not my charge', 'Other')
+
+def is_credit_row(row):
+    try:
+        return float(row.get('amount') or 0) < 0
+    except (TypeError, ValueError):
+        return False
+
 def posted_note():
+    """Optional flag note. A preset reason and a typed note are joined as 'Reason: text'."""
     raw = posted_field('note')
-    return '' if raw is None else clean_note(raw)
+    reason_raw = posted_field('reason')
+    note = '' if raw is None else clean_note(raw)
+    if reason_raw is None:
+        return note
+    reason = str(reason_raw).strip()
+    if reason not in FLAG_REASONS:
+        reason = ''
+    if reason and note:
+        return clean_note(reason + ': ' + note)
+    return reason or note
 
 def canonical_category(value):
     key = str(value or '').strip().casefold()
@@ -242,191 +353,251 @@ def send_email(subj, body, text):
     open(fn, 'wb').write(bytes(msg)); return 'dryrun:' + fn
 
 # ---------- page ----------
-TH = 'background:#006fcf;color:#ffffff;padding:12px;text-align:left;font-size:15px;white-space:nowrap'
-TD = 'padding:14px 12px;border-bottom:1px solid #d9dde3;font-size:15px;vertical-align:middle'
-CSS = """body{margin:0;background:#fff;font-family:Arial,Helvetica,sans-serif;color:#222}
-.wrap{max-width:1000px;margin:0 auto;padding:16px}
-.fl{display:inline-block;min-width:90px;text-align:center;padding:12px 28px;border:2px solid #e0b000;border-radius:6px;background:#ffd600;color:#4a3b00;font-size:16px;font-weight:bold;white-space:nowrap;cursor:pointer}
-.fl.on{background:#c62828;border-color:#8e0000;color:#fff}
-tr.flagged td{background:#fff3cd!important}
-.sub{display:inline-block;min-width:60px;padding:14px 40px;border:2px solid #2e7d32;border-radius:6px;background:#2e7d32;color:#fff;font-size:18px;font-weight:bold;cursor:pointer}
-button:disabled{opacity:.6;cursor:default}
-.done{background:#e8f5e9;border:1px solid #2e7d32;border-radius:8px;padding:14px 16px;font-size:16px;margin:12px 0}
-#flagbox{background:#fff3cd;border:1px solid #e0b000;border-radius:8px;padding:12px 16px;margin:16px 0}
-#flagbox[hidden]{display:none!important}
-#flagbox li,.done li{margin:6px 0;font-size:14px;line-height:1.4}
-.cat{font:14px Arial,Helvetica,sans-serif;max-width:11em}
-#flagcomment{width:100%;box-sizing:border-box;margin-top:4px;font:16px Arial,Helvetica,sans-serif;padding:8px;border:1px solid #c5c9d1;border-radius:4px;background:#fff}
-#notebox{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;display:flex;align-items:center;justify-content:center;padding:16px}
-#notebox[hidden]{display:none!important}
-.notecard{background:#fff;color:#222;border-radius:8px;padding:18px 18px 14px;max-width:480px;width:100%;box-shadow:0 8px 28px rgba(0,0,0,.25)}
-.notecard textarea{width:100%;box-sizing:border-box;margin-top:6px;font:16px Arial,Helvetica,sans-serif;padding:8px;border:1px solid #c5c9d1;border-radius:4px;resize:vertical}
-.notesave{margin-left:8px;padding:10px 22px;border:2px solid #2e7d32;border-radius:6px;background:#2e7d32;color:#fff;font-size:16px;font-weight:bold;cursor:pointer}
-.notecancel{padding:10px 18px;border:1px solid #c5c9d1;border-radius:6px;background:#fff;color:#333;font-size:16px;cursor:pointer}
-@media(max-width:640px){.wrap{padding:8px}.fl{padding:9px 8px!important;min-width:0!important;font-size:13px!important}.fl .t{display:none}td,th{padding:9px 5px!important;font-size:13px!important}}"""
+CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
+.banner{background:#006fcf;color:#fff;font-size:44px;font-weight:bold;text-align:center;padding:22px 12px;margin:0 0 18px;width:100%;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+h1{font-size:36px;margin:0 18px 16px;text-align:left;font-weight:bold}
+.sheet{margin:0 18px 40px}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:8px 10px;vertical-align:top}th{background:#e8e8e8;text-align:left}
+.n{text-align:right;white-space:nowrap}.c{text-align:center}.fc{position:relative;width:70px}
+tr.f td{background:#ffecec}tr.ed td{background:#e3f0ff}tr.cr td{background:#f3fbf3}tr.nx td{background:#fff7cc}
+.lbl{color:#c00;font-weight:bold;font-size:15px}
+.fb{font-size:22px;padding:2px 10px;background:#fff;border:2px solid #d00;color:#d00;border-radius:4px;cursor:pointer}
+.fb.on{background:#d00;color:#fff}button:disabled{opacity:.6;cursor:default}
+.pop{position:fixed;left:50%;top:12%;transform:translateX(-50%);width:min(380px,calc(100vw - 24px));z-index:20;text-align:left;border:2px solid #333;background:#fff;padding:8px;box-shadow:2px 2px 8px #888}
+.pop[hidden]{display:none!important}
+.chips{margin:8px 0;display:flex;flex-wrap:wrap;gap:8px}.pop .chip{display:inline-block;margin:0;font-weight:normal;font-size:17px;border:1px solid #888;border-radius:16px;padding:4px 10px;cursor:pointer}
+.sv{font-size:18px;padding:4px 16px;cursor:pointer}.pop textarea{width:95%;height:50px;font-size:18px;display:block;margin:6px 0}
+label.boxlabel{display:block;font-weight:bold;margin:24px 0 6px}
+#fcb{width:100%;box-sizing:border-box;height:110px;font-size:20px;border:2px solid #333;padding:8px}
+#flaglist{margin:16px 0 0;padding-left:18px}#flaglist li,.done li{margin:6px 0;font-size:15px;line-height:1.4}
+td.cat{position:relative;cursor:pointer}td.cat:hover{outline:2px solid #69c}
+.edited{font-weight:bold}.ed-cat{color:#06c}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
+s.orig{display:block;font-size:14px;color:#888;font-weight:normal}
+.dd{position:absolute;left:0;top:100%;z-index:6;width:min(300px,80vw);background:#fff;border:2px solid #333;box-shadow:2px 2px 8px #888;text-align:left}
+.ddh{font-weight:bold;padding:6px 10px;background:#eee;font-size:17px}.ddo{padding:6px 10px;font-size:18px;border-top:1px solid #ddd;cursor:pointer}
+.ddo:hover{background:#e3f0ff}.ddo.cur{font-weight:bold}.ddo.cx{color:#a00}
+.crn{color:#080;font-weight:bold}.crl{font-size:14px;color:#080;font-weight:bold;border:1px solid #080;border-radius:4px;padding:1px 6px;margin-left:6px}
+tr.ft td{background:#f6f6f6;font-size:22px}tr.net td{font-weight:bold;font-size:24px;background:#eaeaea}
+.done{background:#e8f5e9;border:1px solid #2e7d32;border-radius:8px;padding:14px 16px;font-size:16px;margin:0 0 16px}
+.sub{margin-top:24px;font-size:28px;padding:14px 60px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}
+.prt{margin-top:24px;margin-left:12px;font-size:28px;padding:14px 50px;background:#fff;color:#333;border:2px solid #333;border-radius:6px;cursor:pointer}
+@media(max-width:700px){body{font-size:15px}.banner{font-size:28px;padding:16px 8px}h1{font-size:26px;margin:0 8px 12px}.sheet{margin:0 8px 24px}
+td,th{padding:6px}.sub,.prt{font-size:20px;padding:12px 22px}#fcb{height:80px;font-size:16px}tr.ft td,tr.net td{font-size:16px}}
+@media print{button,.pop,.dd{display:none!important}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
+tr{page-break-inside:avoid}td,th{padding:4px 6px}#fcb{height:60px}tr.ft td{font-size:12pt}tr.net td{font-size:13pt}
+*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+"""
 
-JS = """var pending=null;
-function noteBox(){return document.getElementById('notebox')}
-function openNote(f){
-  pending=f;
-  var ta=document.getElementById('note');
-  ta.value='';
-  document.getElementById('notecount').textContent='0';
-  var tds=f.closest('tr').querySelectorAll('td');
-  document.getElementById('notewho').textContent=(tds[0].innerText+' \\u00b7 '+tds[2].innerText+' \\u00b7 '+tds[3].innerText).replace(/\\s+/g,' ').trim();
-  noteBox().hidden=false;
-  ta.focus();
-}
-function closeNote(){pending=null;noteBox().hidden=true}
+JS = r"""var CATS=__CATS__;
+function closeDD(){document.querySelectorAll('.dd').forEach(function(d){d.remove()})}
+function markEdited(el,v,orig,cls){
+  if(v===orig){el.textContent=orig;return false}
+  el.textContent='';
+  var n=document.createElement('span');n.className='edited '+cls;n.textContent=v;el.appendChild(n);
+  if(orig){var s=document.createElement('s');s.className='orig';s.textContent=orig;el.appendChild(s)}
+  return true}
+function openCat(td,ev){
+  if(ev.target.closest('.dd'))return;
+  closeDD();
+  var d=document.createElement('div');d.className='dd';
+  var h=document.createElement('div');h.className='ddh';h.textContent='Pick category';d.appendChild(h);
+  CATS.forEach(function(o){
+    var item=document.createElement('div');
+    item.className='ddo'+(o===(td.getAttribute('data-cur')||'')?' cur':'');
+    item.textContent=o;d.appendChild(item)});
+  var cx=document.createElement('div');cx.className='ddo cx';cx.textContent='Cancel';d.appendChild(cx);
+  d.addEventListener('click',function(e){
+    e.stopPropagation();
+    var o=e.target.closest('.ddo');if(!o)return;
+    if(!o.classList.contains('cx'))setCat(td,o.textContent);
+    closeDD()});
+  td.appendChild(d)}
+function setCat(td,v){
+  var orig=td.getAttribute('data-orig')||'';
+  fetch(td.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
+    if(!r.ok)return;
+    var changed=markEdited(td,v,orig,'ed-cat');
+    td.setAttribute('data-cur',v);
+    td.parentNode.classList.toggle('ed',!!changed);
+  })}
+document.addEventListener('click',function(e){if(!e.target.closest('td.cat'))closeDD()});
+var pop=document.getElementById('pop');
+function closePop(){pop.hidden=true;if(pop.parentNode!==document.body)document.body.appendChild(pop)}
+function paintMerchant(tr,flagged,note){
+  var m=tr.cells[1];var name=tr.getAttribute('data-merchant')||'';
+  m.textContent='';
+  if(flagged){var lbl=document.createElement('span');lbl.className='lbl';lbl.textContent='Flag charge';m.appendChild(lbl);m.appendChild(document.createTextNode(' '))}
+  m.appendChild(document.createTextNode(name));
+  if(tr.classList.contains('cr')){m.appendChild(document.createTextNode(' '));var b=document.createElement('span');b.className='crl';b.textContent='Credit';m.appendChild(b)}
+  if(flagged&&note){var rd=document.createElement('div');rd.className='rsn';var n=document.createElement('span');n.className='edited ed-note';n.textContent=note;rd.appendChild(n);m.appendChild(rd)}}
 function placeLi(list,li,row){
   var kids=list.children;
-  for(var i=0;i<kids.length;i++){
-    if(parseInt(kids[i].getAttribute('data-row'),10)>row){list.insertBefore(li,kids[i]);return}
-  }
-  list.appendChild(li);
-}
-function applyFlag(f,j){
-  var b=f.querySelector('button');
-  var tr=f.closest('tr');
-  tr.classList.toggle('flagged',!!j.flagged);
-  b.classList.toggle('on',!!j.flagged);
-  b.querySelector('.t').textContent=j.flagged?' Flagged':' Flag';
-  document.getElementById('nf').textContent=j.count;
+  for(var i=0;i<kids.length;i++){if(parseInt(kids[i].getAttribute('data-row'),10)>row){list.insertBefore(li,kids[i]);return}}
+  list.appendChild(li)}
+function applyFlag(btn,tr,j){
+  btn.classList.toggle('on',!!j.flagged);
+  btn.textContent=j.flagged?'\u2691':'\u2690';
+  btn.title=j.flagged?'Flagged':'Flag';
+  tr.classList.toggle('f',!!j.flagged);
+  paintMerchant(tr,!!j.flagged,j.note||'');
   var list=document.getElementById('flaglist');
-  var box=document.getElementById('flagbox');
   if(list){
-    var li=list.querySelector('li[data-row=\"'+j.row+'\"]');
-    if(j.flagged){
-      if(!li){li=document.createElement('li');li.setAttribute('data-row',String(j.row));placeLi(list,li,j.row)}
-      li.textContent=j.line||'';
-      if(box) box.hidden=false;
-    }else if(li){
-      li.remove();
-      if(box && !list.children.length) box.hidden=true;
-    }
-  }
-  b.disabled=false;
-}
-function postFlag(f,note){
-  var b=f.querySelector('button');
-  b.disabled=true;
-  var hid=f.querySelector('input[name=note]');
-  if(hid) hid.value=note==null?'':note;
+    var li=list.querySelector('li[data-row="'+j.row+'"]');
+    if(j.flagged){if(!li){li=document.createElement('li');li.setAttribute('data-row',String(j.row));placeLi(list,li,j.row)}li.textContent=j.line||''}
+    else if(li)li.remove()}}
+function postFlag(btn,reason,note,saving){
+  var tr=btn.closest('tr');btn.disabled=true;
   var opts={method:'POST',headers:{'Accept':'application/json'}};
-  if(note!=null){opts.headers['Content-Type']='application/x-www-form-urlencoded';opts.body='note='+encodeURIComponent(note)}
-  fetch(f.action,opts).then(function(r){
+  if(saving){opts.headers['Content-Type']='application/x-www-form-urlencoded';opts.body='reason='+encodeURIComponent(reason||'')+'&note='+encodeURIComponent(note||'')}
+  fetch(btn.getAttribute('data-action'),opts).then(function(r){
     return r.json().then(function(j){return {ok:r.ok,j:j}},function(){throw new Error('bad')});
-  }).then(function(x){if(!x.ok){b.disabled=false;return}applyFlag(f,x.j)}).catch(function(){f.submit()});
-}
-document.querySelectorAll('form.f').forEach(function(f){f.addEventListener('submit',function(ev){
-  ev.preventDefault();
-  var b=f.querySelector('button');
-  if(b.disabled) return;
-  if(!noteBox().hidden){if(!b.classList.contains('on')) openNote(f);return}
-  if(b.classList.contains('on')) postFlag(f,null); else openNote(f);
-})});
-document.getElementById('notesave').addEventListener('click',function(){
-  if(!pending) return;
-  var f=pending, note=document.getElementById('note').value.slice(0,500);
-  closeNote(); postFlag(f,note);
-});
-document.getElementById('notecancel').addEventListener('click',closeNote);
-document.getElementById('note').addEventListener('input',function(){document.getElementById('notecount').textContent=String(this.value.length)});
-document.addEventListener('keydown',function(ev){if(!noteBox().hidden && ev.key==='Escape'){ev.preventDefault();closeNote()}});
-noteBox().addEventListener('click',function(ev){if(ev.target===noteBox()) closeNote()});
-var commentBox=document.getElementById('flagcomment');
-if(commentBox){
+  }).then(function(x){
+    btn.disabled=false;if(!x.ok)return;
+    applyFlag(btn,tr,x.j);
+    if(saving){closePop();
+      document.querySelectorAll('tr.nx').forEach(function(n){n.classList.remove('nx')});
+      var n=tr.nextElementSibling;while(n&&!n.getAttribute('data-id'))n=n.nextElementSibling;
+      if(n){n.classList.add('nx');n.scrollIntoView({block:'center',behavior:'smooth'})}}
+  }).catch(function(){btn.disabled=false})}
+function openPop(btn){
+  if(btn.disabled)return;
+  if(btn.classList.contains('on')){postFlag(btn,null,null,false);return}
+  var td=btn.parentNode;
+  if(pop.parentNode===td&&!pop.hidden){closePop();return}
+  pop.querySelectorAll('input[name=r]').forEach(function(x){x.checked=false});
+  var preset=pop.querySelector('input[name=r]');if(preset)preset.checked=true;
+  pop.querySelector('textarea').value='';
+  td.appendChild(pop);pop.hidden=false;pop.querySelector('textarea').focus()}
+function savePop(){
+  if(pop.hidden||!pop.parentNode||!pop.parentNode.classList.contains('fc'))return;
+  var btn=pop.parentNode.querySelector('.fb');if(!btn)return;
+  var reason='';pop.querySelectorAll('input[name=r]').forEach(function(x){if(x.checked)reason=x.value});
+  postFlag(btn,reason,pop.querySelector('textarea').value.slice(0,500),true)}
+document.querySelectorAll('button.fb').forEach(function(b){b.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();openPop(b)})});
+document.getElementById('popsave').addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();savePop()});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pop.hidden){ev.preventDefault();closePop()}closeDD()}});
+var commentBox=document.getElementById('fcb');
+if(commentBox&&commentBox.getAttribute('data-action')){
   var commentTimer=null;
   commentBox.addEventListener('input',function(){
     clearTimeout(commentTimer);
     commentTimer=setTimeout(function(){
       fetch(commentBox.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'comment='+encodeURIComponent(commentBox.value.slice(0,500))}).catch(function(){});
-    },400);
-  });
-}
-document.querySelectorAll('select.cat').forEach(function(s){
-  s.addEventListener('focus',function(){s.setAttribute('data-prev',s.value)});
-  s.addEventListener('change',function(){
-    var prev=s.getAttribute('data-prev')||'';
-    fetch(s.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(s.value)}).then(function(r){
-      if(!r.ok){s.value=prev;return} s.setAttribute('data-prev',s.value);
-    }).catch(function(){s.value=prev});
-  });
-});"""
+    },400)})}
+"""
 
-def category_select(token, row, chosen, locked):
-    blank = ' selected' if not chosen else ''
-    opts = [f"<option value=''{blank}>Select</option>"]
-    for c in AMEX_CATEGORIES:
-        sel = ' selected' if c == chosen else ''
-        opts.append(f"<option value='{html.escape(c)}'{sel}>{html.escape(c)}</option>")
-    dis = ' disabled' if locked else ''
-    return (f"<select class='cat' data-row='{int(row['id'])}' data-action='/v/{token}/category/{int(row['id'])}'{dis}>"
-            + ''.join(opts) + "</select>")
+def category_view(row, categories):
+    """Current Amex category, the statement original, and whether the employee changed it."""
+    original = str(row.get('category') or '')
+    explicit = isinstance(categories, dict) and row.get('id') in categories
+    if explicit:
+        current = categories.get(row['id']) or ''
+    else:
+        current = canonical_category(original) or original
+    baseline = canonical_category(original) or original
+    edited = bool(explicit and (current or '') != baseline)
+    return current, original, edited
+
+def popup_html():
+    chips = []
+    for i, reason in enumerate(FLAG_REASONS):
+        checked = ' checked' if i == 0 else ''
+        chips.append(f"<label class='chip'><input type='radio' name='r' value='{html.escape(reason)}'{checked}> {html.escape(reason)}</label>")
+    return ("<div class='pop' id='pop' hidden role='dialog' aria-modal='true' aria-labelledby='poptitle'>"
+            "<b id='poptitle'>Note/Reason</b><div class='chips'>" + ''.join(chips) + "</div>"
+            "<textarea id='popnote' maxlength='500' placeholder='Type your own note'></textarea>"
+            "<button type='button' class='sv' id='popsave'>Save</button></div>")
 
 def render(doc, e, token, flags, submitted, comment='', categories=None):
-    esc = html.escape; rows = e['rows']; locked = submitted is not None
+    esc = html.escape
+    rows = sorted_rows(e['rows'])
+    locked = submitted is not None
     categories = categories or {}
     if submitted is not None and 'comment' in submitted:
         comment = submitted.get('comment') or ''
     lis = flag_items_html(rows, flags)
-    out = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-           f"<meta name='robots' content='noindex'><title>Amex verification - {esc(e['first'])}</title><style>{CSS}</style></head><body><div class='wrap'>",
-           f"<p style='margin:8px 0 2px;font-size:20px;font-weight:bold'>{esc(e['first'])}</p>"
-           f"<p style='margin:0 0 16px;font-size:14px;color:#555'>{esc(doc.get('due','Due by the first'))}</p>"]
+    charges = [r for r in rows if not is_credit_row(r)]
+    credits = [r for r in rows if is_credit_row(r)]
+    tot_ch = sum(float(r['amount']) for r in charges)
+    tot_cr = sum(float(r['amount']) for r in credits)
+    credit_cell = f"<span class='crn'>{money_signed(tot_cr)}</span>" if credits else 'None'
+    parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head><body>"
+             f"<div class='banner'>American Express Charges</div><h1>{esc(e['name'])}</h1><div class='sheet'>"]
     if locked:
-        listed = f"<ul id='flaglist' style='margin:8px 0 0;padding-left:18px'>{lis}</ul>" if lis else ''
+        listed = f"<ul id='flaglist'>{lis}</ul>" if lis else ''
         comment_html = f"<p style='margin:8px 0 0'>{esc(flag_comment_line(comment))}</p>" if flag_comment_line(comment) else ''
-        out.append(f"<div class='done'><b>Submitted {esc(nice(submitted['ts']))}.</b> All unflagged charges approved. "
-                   f"{len(submitted['flagged'])} flagged for review. Thank you.{listed}{comment_html}</div>")
-    out.append(f"<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;border-collapse:collapse;border:1px solid #d9dde3'>"
-               f"<tr><th style='{TH}'>Date</th><th style='{TH}'>Description</th><th style='{TH}'>Company</th>"
-               f"<th style='{TH};text-align:right'>Amount</th><th style='{TH}'>Category</th><th style='{TH};text-align:center'>Flag</th></tr>")
-    for i, r in enumerate(rows):
-        on = r['id'] in flags; bg = '#ffffff' if i % 2 == 0 else '#f5f8fc'
-        btn = (f"<form class='f' method='post' action='/v/{token}/flag/{r['id']}' style='margin:0'>"
-               f"<input type='hidden' name='note' value=''>"
-               f"<button class='fl{' on' if on else ''}'{' disabled' if locked else ''}>&#9873;<span class='t'> {'Flagged' if on else 'Flag'}</span></button></form>")
-        out.append(f"<tr class='{'flagged' if on else ''}' style='background:{bg}'><td style='{TD}'><b>{esc(r['date'][:5])}</b></td>"
-                   f"<td style='{TD}'>{esc(r['category'])}</td><td style='{TD}'>{esc(r['company'])}</td>"
-                   f"<td style='{TD};text-align:right'><b>{money(r['amount'])}</b></td>"
-                   f"<td style='{TD}'>{category_select(token, r, chosen_category(r, categories), locked)}</td>"
-                   f"<td style='padding:14px 8px;border-bottom:1px solid #d9dde3;text-align:center'>{btn}</td></tr>")
-    tot = sum(r['amount'] for r in rows)
-    out.append(f"<tr><td colspan='3' style='padding:14px 12px;font-size:16px;font-weight:bold'>Total ({len(rows)} charges)</td>"
-               f"<td style='padding:14px 12px;font-size:16px;font-weight:bold;text-align:right'>{money(tot)}</td>"
-               f"<td></td><td style='padding:14px 8px;text-align:center;font-size:14px;color:#555'><span id='nf'>{len(flags)}</span> flagged</td></tr></table>")
+        parts.append(f"<div class='done'><b>Submitted {esc(nice(submitted['ts']))}.</b> All unflagged charges approved. "
+                     f"{len(submitted['flagged'])} flagged for review. Thank you.{listed}{comment_html}</div>")
+    parts.append("<table><tr><th>Date</th><th>Merchant</th><th>Amount</th><th>Amex Category</th><th>Flag</th></tr>")
+    for r in rows:
+        rid = int(r['id'])
+        credit = is_credit_row(r)
+        on = (not credit) and (rid in flags)
+        current, original, edited = category_view(r, categories)
+        shown = current or original
+        if edited and not credit:
+            strike = f"<s class='orig'>{esc(original)}</s>" if original and original != current else ''
+            inner = f"<span class='edited ed-cat'>{esc(current)}</span>{strike}"
+        else:
+            inner = esc(shown)
+        cat_cls = '' if credit or locked else " class='cat'"
+        cat_click = '' if credit or locked else " onclick='openCat(this,event)'"
+        cat_action = '' if credit or locked else f" data-action='/v/{token}/category/{rid}'"
+        tr_cls = []
+        if credit: tr_cls.append('cr')
+        if on: tr_cls.append('f')
+        if edited and not credit: tr_cls.append('ed')
+        cls_attr = f" class='{' '.join(tr_cls)}'" if tr_cls else ''
+        merchant = []
+        if on:
+            merchant.append("<span class='lbl'>Flag charge</span> ")
+        merchant.append(esc(r['company']))
+        if credit:
+            merchant.append(" <span class='crl'>Credit</span>")
+        if on:
+            note = flag_meta(flags, rid).get('note') or ''
+            if note:
+                merchant.append(f"<div class='rsn'><span class='edited ed-note'>{esc(note)}</span></div>")
+        if credit:
+            amount = f"<span class='crn'>{money_signed(r['amount'])}</span>"
+            flag = ''
+        else:
+            amount = f"<b>{money(r['amount'])}</b>"
+            dis = ' disabled' if locked else ''
+            flag = (f"<button type='button' class='fb{' on' if on else ''}' data-action='/v/{token}/flag/{rid}' "
+                    f"title='{'Flagged' if on else 'Flag'}'{dis}>{'&#9873;' if on else '&#9872;'}</button>")
+        parts.append(f"<tr{cls_attr} data-id='{rid}' data-merchant='{esc(r['company'])}'><td>{esc(r['date'])}</td>"
+                     f"<td>{''.join(merchant)}</td><td class='n'>{amount}</td>"
+                     f"<td{cat_cls} data-orig='{esc(original)}' data-cur='{esc(shown)}'{cat_action}{cat_click}>{inner}</td>"
+                     f"<td class='c fc'>{flag}</td></tr>")
+    parts.append(f"<tr class='ft'><td colspan='2'>Total charges</td><td class='n'>{money(tot_ch)}</td><td colspan='2'></td></tr>"
+                 f"<tr class='ft'><td colspan='2'>Credits</td><td class='n'>{credit_cell}</td><td colspan='2'></td></tr>"
+                 f"<tr class='ft net'><td colspan='2'>Net Total</td><td class='n'>{money_signed(tot_ch + tot_cr)}</td><td colspan='2'></td></tr></table>")
     if not locked:
-        hidden = '' if lis else ' hidden'
-        out.append(f"<form method='post' action='/v/{token}/submit'>"
-                   f"<div id='flagbox'{hidden}><p style='font-weight:bold;margin:0 0 8px'>Flagged for review</p>"
-                   f"<ul id='flaglist' style='margin:0;padding-left:18px'>{lis}</ul>"
-                   f"<label for='flagcomment' style='display:block;margin:12px 0 4px;font-weight:bold'>Flagged charges</label>"
-                   f"<textarea id='flagcomment' name='comment' maxlength='500' rows='2' data-action='/v/{token}/comment' "
-                   f"placeholder='e.g. wrong category'>{esc(comment)}</textarea></div>"
-                   f"<div style='text-align:center;margin:24px 0'><button class='sub' onclick=\"this.disabled=true;this.form.submit()\">Submit</button></div></form>")
-    out.append("<table width='100%' style='width:100%;border-top:2px solid #d9dde3;font-size:15px;margin-top:16px'><tr><td style='padding-top:14px'>"
-               "<p style='font-weight:bold;font-size:17px;margin:0 0 10px'>Key</p>"
-               "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#b38f00'>&#9873; Flag</span>Needs review before the bill is paid.</p>"
-               "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#2e7d32'>Submit</span>Approves all unflagged charges on this chart.</p></td></tr></table>"
-               "<p style='font-size:14px;margin-top:20px'>Chris AI<br>Cox Research, Assistant<br>2252780616<br>Littledude@coxresearch.com<br><br>https://coxresearch.com</p>"
-               "<div id='notebox' hidden><div class='notecard' role='dialog' aria-modal='true' aria-labelledby='notetitle'>"
-               "<p id='notetitle' style='margin:0 0 6px;font-size:18px;font-weight:bold'>Flag this charge</p>"
-               "<p id='notewho' style='margin:0 0 10px;font-size:14px;color:#555'></p>"
-               "<label for='note' style='font-size:14px'>Reason note (optional)</label>"
-               "<textarea id='note' maxlength='500' rows='4' placeholder='Why does this need review?'></textarea>"
-               "<p style='margin:6px 0 12px;font-size:12px;color:#777;text-align:right'><span id='notecount'>0</span>/500</p>"
-               "<div style='text-align:right'><button type='button' id='notecancel' class='notecancel'>Cancel</button>"
-               "<button type='button' id='notesave' class='notesave'>Save</button></div></div></div>"
-               f"</div><script>{JS}</script></body></html>")
-    return ''.join(out)
-
+        parts.append(f"<ul id='flaglist'>{lis}</ul>"
+                     f"<form method='post' action='/v/{token}/submit'>"
+                     f"<label class='boxlabel' for='fcb'>Flagged charges</label>"
+                     f"<textarea id='fcb' name='comment' maxlength='500' data-action='/v/{token}/comment' "
+                     f"placeholder='e.g. wrong category'>{esc(comment)}</textarea>"
+                     f"<button class='sub' type='submit'>Submit</button></form>"
+                     f"<button class='prt' type='button' onclick='window.print()'>Print</button>")
+    else:
+        parts.append("<button class='prt' type='button' onclick='window.print()'>Print</button>")
+    script = JS.replace('__CATS__', json.dumps(list(AMEX_CATEGORIES)))
+    parts.append(popup_html() + f"<script>{script}</script></div></body></html>")
+    return ''.join(parts)
 def nice(ts):
     return datetime.fromisoformat(ts).strftime('%b %-d, %Y %-I:%M %p') + ' CT'
 
 def meta():
     return {'ts': now(), 'ip': request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip(),
             'ua': request.headers.get('User-Agent', '')[:300]}
+
+@app.after_request
+def stamp(resp):
+    resp.headers['X-Amex-Page'] = 'review-banner'
+    return resp
 
 @app.get('/healthz')
 def healthz(): return 'ok'
@@ -458,6 +629,8 @@ def flag(token, row):
     if not doc: abort(404)
     r = next((x for x in e['rows'] if x['id'] == row), None)
     if not r: abort(404)
+    if is_credit_row(r):
+        return jsonify(error='credit'), 400
     flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted', flagged=row in flags, count=len(flags)), 409
     on = row not in flags
@@ -468,7 +641,9 @@ def flag(token, row):
     count = len(flags) + (1 if on else -1)
     if 'application/json' in request.headers.get('Accept', ''):
         payload = {'flagged': on, 'count': count, 'row': row}
-        if on: payload['line'] = flag_line(r, rec.get('note', ''), rec['ts'])
+        if on:
+            payload['note'] = rec.get('note') or ''
+            payload['line'] = flag_line(r, rec.get('note', ''), rec['ts'])
         return jsonify(payload)
     return redirect(f'/v/{token}', 303)
 
@@ -479,8 +654,9 @@ def submit(token):
     with SUBMIT_LOCK:
       flags, sub, stored_comment, categories = state(doc['stmt'], e['id'])
       if not sub:
-          flagged = attach_flag_meta([r for r in e['rows'] if r['id'] in flags], flags)
-          approved = [dict(r) for r in e['rows'] if r['id'] not in flags]
+          rows = sorted_rows(e['rows'])
+          flagged = attach_flag_meta([r for r in rows if r['id'] in flags], flags)
+          approved = [dict(r) for r in rows if r['id'] not in flags]
           for r in flagged + approved:
               r['amex_category'] = chosen_category(r, categories)
           incoming = posted_field('comment')
@@ -519,6 +695,8 @@ def set_category(token, row):
     if not doc: abort(404)
     r = next((x for x in e['rows'] if x['id'] == row), None)
     if not r: abort(404)
+    if is_credit_row(r):
+        return jsonify(error='credit'), 400
     _flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted'), 409
     raw = posted_field('category')
@@ -579,8 +757,23 @@ def admin_upload():
     """Add/replace a statement without a redeploy: POST the statements/<stmt>.json body."""
     need_admin(); doc = request.get_json(force=True)
     assert doc.get('stmt') and isinstance(doc.get('employees'), list)
+    bundled_path = os.path.join(APP_DIR, 'statements', 'bundled', doc['stmt'] + '.json')
+    bundled = {}
+    if os.path.isfile(bundled_path):
+        with open(bundled_path) as fh:
+            bundled = json.load(fh)
+    disk_path = os.path.join(DATA_DIR, 'statements', doc['stmt'] + '.json')
+    current = {}
+    if os.path.isfile(disk_path):
+        with open(disk_path) as fh:
+            current = json.load(fh)
+    # An upload always outranks the copy shipped in the image.
+    doc['bundle_rev'] = max(bundle_rev(doc), bundle_rev(bundled), bundle_rev(current)) + 1
+    lock_routing(doc)
     d = os.path.join(DATA_DIR, 'statements'); os.makedirs(d, exist_ok=True)
-    json.dump(doc, open(os.path.join(d, doc['stmt'] + '.json'), 'w'), indent=1)
+    with open(os.path.join(d, doc['stmt'] + '.json'), 'w') as fh:
+        json.dump(doc, fh, indent=1)
+        fh.write('\n')
     return jsonify(ok=True, stmt=doc['stmt'], employees=len(doc['employees']))
 
 @app.post('/admin/reset/<stmt>/<emp_id>')

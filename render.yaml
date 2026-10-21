@@ -29,7 +29,7 @@ services:
       - key: EMAIL_MODE            # dryrun until the mail credential is in, then smtp (or resend)
         value: dryrun
       - key: RECORD_TO
-        value: littledude@coxresearch.com
+        value: littledude@mail.grokbot.com
       - key: RECORD_CC             # optional, e.g. chris@coxresearch.com
         value: ""
       - key: MAIL_FROM

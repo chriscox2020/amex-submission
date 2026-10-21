@@ -95,13 +95,25 @@ class FlagNoteTest(unittest.TestCase):
 
     def test_popup_is_hidden_until_flag(self):
         page = self.page()
-        self.assertIn("id='notebox' hidden", page)
+        self.assertIn("id='pop' hidden", page)
+        self.assertIn(">Note/Reason</b>", page)
         self.assertIn(">Save</button>", page)
-        self.assertIn(">Cancel</button>", page)
+        self.assertIn("placeholder='Type your own note'", page)
         self.assertIn("maxlength='500'", page)
-        self.assertIn("id='flagbox' hidden", page)
+        for reason in app.FLAG_REASONS:
+            self.assertIn(f"value='{html.escape(reason)}'", page)
+        self.assertIn("class='banner'>American Express Charges", page)
+        self.assertIn(">Sample Employee</h1>", page)
+        self.assertIn(">Flagged charges</label>", page)
+        self.assertIn("id='fcb'", page)
+        self.assertIn(">Print</button>", page)
+        self.assertIn("button,.pop,.dd{display:none!important}", page)
         self.assertIn(f"/v/{self.token}/flag/1", page)
         self.assertNotIn('Note:', page)
+        low = page.lower()
+        self.assertNotIn('dry run', low)
+        self.assertNotIn('preview', low)
+        self.assertNotIn('quickbooks', low)
 
     def test_helpers(self):
         self.assertEqual(app.charge_ref({}), 'ref pending')
@@ -152,10 +164,10 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.flags()[2]['note'], '')
         self.assertIn('>wrong category</textarea>', page)
         self.assertIn('>Flagged charges</label>', page)
-        self.assertIn("<option value='Travel' selected>Travel</option>", page)
-        self.assertIn("<option value='Restaurant' selected>Restaurant</option>", page)
+        self.assertIn("data-orig='Travel'", page)
+        self.assertIn("<span class='edited ed-cat'>Restaurant</span><s class='orig'>Meals</s>", page)
         for name in app.AMEX_CATEGORIES:
-            self.assertIn(html.escape(name), page)
+            self.assertIn(json.dumps(name), page)
 
         submitted = self.client.post(f'/v/{self.token}/submit', data={'comment': 'wrong category'})
         self.assertEqual(submitted.status_code, 303)
@@ -181,7 +193,8 @@ class FlagNoteTest(unittest.TestCase):
                 text = part.get_payload(decode=True).decode()
             elif part.get_content_type() == 'text/html':
                 html_body = part.get_payload(decode=True).decode()
-        self.assertEqual(msg['To'], 'littledude@coxresearch.com')
+        self.assertEqual(msg['To'], 'littledude@mail.grokbot.com')
+        self.assertEqual(app.RECORD_TO, 'littledude@mail.grokbot.com')
         self.assertEqual(msg['Cc'], 'chris@coxresearch.com')
         self.assertIn('\n  ' + LINE_NOTE + '\n', text)
         self.assertIn('\n  ' + LINE_HTML + '\n', text)
@@ -302,6 +315,87 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.client.post('/v/AAAAAAAAAAAAAAAAAAAAAAAA/category/1', data={'category': 'Travel'},
                                           headers={'Accept': 'application/json'}).status_code, 404)
         self.assertEqual(len(app.read_log()), before)
+
+    def test_record_address_credits_and_alice_routing(self):
+        self.assertEqual(app.normalize_record_to('littledude@coxresearch.com'), 'littledude@mail.grokbot.com')
+        self.assertEqual(app.normalize_record_to(''), 'littledude@mail.grokbot.com')
+        self.assertEqual(app.normalize_record_to('other@example.com'), 'other@example.com')
+        src = (ROOT / 'app.py').read_text().lower()
+        for banned in ('quickbooks', 'intuit.com', 'americanexpress.com', 'api.amex'):
+            self.assertNotIn(banned, src)
+
+        doc = {
+            'stmt': '2026-11-01',
+            'label': 'Nov 1, 2026 statement',
+            'employees': [{
+                'id': 'alice-cox',
+                'name': 'Alice E Cox',
+                'first': 'Alice',
+                'email': 'alice@coxresearch.com',
+                'rows': [
+                    {'id': 1, 'date': '09/02/2026', 'category': 'Restaurant', 'company': 'CAFE', 'amount': 10.0},
+                    {'id': 2, 'date': '08/15/2026', 'category': 'Merchandise & Supplies', 'company': 'AUTOZONE', 'amount': -2.5},
+                ],
+            }],
+        }
+        path = pathlib.Path(app.DATA_DIR, 'statements', '2026-11-01.json')
+        path.write_text(json.dumps(doc))
+        loaded = app.load_statements()['2026-11-01']['employees'][0]
+        self.assertEqual(loaded['email'], 'chris@coxresearch.com')
+        self.assertEqual(loaded['send_to'], 'chris@coxresearch.com')
+        token = app.make_token('2026-11-01', 'alice-cox')
+        page = self.client.get(f'/v/{token}').get_data(as_text=True)
+        self.assertIn("class='banner'>American Express Charges", page)
+        self.assertIn('>Alice E Cox</h1>', page)
+        self.assertLess(page.index('AUTOZONE'), page.index('CAFE'))
+        self.assertIn('Total charges', page)
+        self.assertIn('>Credits</td>', page)
+        self.assertIn('Net Total', page)
+        self.assertIn('$10.00', page)
+        self.assertIn('&minus;$2.50', page)
+        self.assertIn('$7.50', page)
+        self.assertIn('>Credit</span>', page)
+        self.assertEqual(page.count("class='fb'"), 1)
+        self.assertIn(f'/v/{token}/flag/1', page)
+        self.assertNotIn(f'/v/{token}/flag/2', page)
+        self.assertNotIn(f'/v/{token}/category/2', page)
+        self.assertNotIn('dry run', page.lower())
+        self.assertNotIn('preview', page.lower())
+        self.assertEqual(self.client.post(f'/v/{token}/flag/2', data={'note': 'x'},
+                                          headers={'Accept': 'application/json'}).status_code, 400)
+        self.assertEqual(self.client.post(f'/v/{token}/category/2', data={'category': 'Travel'},
+                                          headers={'Accept': 'application/json'}).status_code, 400)
+        joined = self.client.post(f'/v/{token}/flag/1', data={'reason': 'Wrong price', 'note': 'too high'},
+                                  headers={'Accept': 'application/json'})
+        self.assertEqual(joined.get_json()['note'], 'Wrong price: too high')
+        self.assertTrue(joined.get_json()['line'].endswith('Note: Wrong price: too high'))
+
+        bundled = app.load_statements()['2026-09-22']
+        by_id = {e['id']: e for e in bundled['employees']}
+        chris, alice = by_id['chris-cox'], by_id['alice-cox']
+        self.assertEqual(alice['email'], 'chris@coxresearch.com')
+        self.assertEqual(alice['send_to'], 'chris@coxresearch.com')
+        positive = [r for r in chris['rows'] if r['amount'] > 0]
+        negative = [r for r in chris['rows'] if r['amount'] < 0]
+        self.assertEqual(len(positive), 72)
+        self.assertEqual(round(sum(r['amount'] for r in positive), 2), 17048.40)
+        self.assertEqual(len(negative), 1)
+        self.assertEqual(round(negative[0]['amount'], 2), -24.31)
+        self.assertIn('AUTOZONE', negative[0]['company'].upper())
+        self.assertEqual(round(sum(r['amount'] for r in chris['rows']), 2), 17024.09)
+        self.assertEqual(len(alice['rows']), 9)
+        self.assertEqual(round(sum(r['amount'] for r in alice['rows']), 2), 480.62)
+        dates = [r['date'] for r in chris['rows']]
+        from datetime import datetime
+        self.assertEqual(dates, sorted(dates, key=lambda d: datetime.strptime(d, '%m/%d/%Y')))
+        chris_page = self.client.get(f"/v/{app.make_token('2026-09-22', 'chris-cox')}").get_data(as_text=True)
+        self.assertIn("class='banner'>American Express Charges", chris_page)
+        self.assertIn('>Chris Cox</h1>', chris_page)
+        self.assertEqual(chris_page.count("class='fb'"), 72)
+        self.assertIn('$17,048.40', chris_page)
+        self.assertIn('&minus;$24.31', chris_page)
+        self.assertIn('$17,024.09', chris_page)
+        self.assertNotIn(f"/v/{app.make_token('2026-09-22', 'chris-cox')}/flag/54", chris_page)
 
 
 if __name__ == '__main__':

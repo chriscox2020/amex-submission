@@ -23,6 +23,10 @@ BTN = ('display:inline-block;text-align:center;padding:14px 40px;border:2px soli
        'color:#ffffff;font-size:18px;font-weight:bold;text-decoration:none;white-space:nowrap')
 for e in doc['employees']:
     if only and e['id'] not in only: continue
+    send_to = e.get('send_to') or e.get('email') or ''
+    if e['id'] == 'alice-cox' or ' '.join(e['name'].upper().split()) in ('ALICE E COX', 'ALICE COX'):
+        if send_to != 'chris@coxresearch.com':
+            raise SystemExit(f"Alice must route to chris@coxresearch.com, got {send_to}")
     url = f"{BASE}/v/{app.make_token(stmt, e['id'])}"; esc = html.escape
     tot = sum(r['amount'] for r in e['rows'])
     rows = ''.join(f"<tr style='background:{'#ffffff' if i % 2 == 0 else '#f5f8fc'}'><td style='{TD}'><b>{esc(r['date'][:5])}</b></td>"
@@ -39,6 +43,7 @@ for e in doc['employees']:
          "<p style='font-size:14px;margin-top:20px'>Chris AI<br>Cox Research, Assistant<br>2252780616<br>Littledude@coxresearch.com<br><br>https://coxresearch.com</p></td></tr></table>")
     subject = f"{e['first']}'s Amex charges"
     open(os.path.join(outdir, e['id'] + '.subject.txt'), 'w').write(subject)
+    open(os.path.join(outdir, e['id'] + '.to.txt'), 'w').write(send_to + '\n')
     fn = os.path.join(outdir, e['id'] + '.html'); open(fn, 'w').write(h)
     assert 'mailto' not in h and h.count(url) == 1
-    print(e['id'], len(e['rows']), f'{tot:.2f}', url, fn)
+    print(e['id'], len(e['rows']), f'{tot:.2f}', 'to', send_to, url, fn)
