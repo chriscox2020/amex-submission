@@ -470,7 +470,7 @@ label.boxlabel{display:block;font-weight:bold;margin:24px 0 6px}
 td.cat{position:relative;cursor:pointer}td.cat:hover{outline:2px solid #69c}
 .edited{font-weight:bold}.ed-cat{color:#06c}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
 s.orig{display:block;font-size:14px;color:#888;font-weight:normal}
-.dd{position:absolute;left:0;top:100%;z-index:6;width:min(300px,80vw);background:#fff;border:2px solid #333;box-shadow:2px 2px 8px #888;text-align:left}
+.dd{position:absolute;left:0;top:100%;z-index:6;width:min(460px,92vw);background:#fff;border:2px solid #333;box-shadow:2px 2px 8px #888;text-align:left}
 .ddh{font-weight:bold;padding:6px 10px;background:#eee;font-size:17px}.ddo{padding:6px 10px;font-size:18px;border-top:1px solid #ddd;cursor:pointer}
 .ddo:hover{background:#e3f0ff}.ddo.cur{font-weight:bold}.ddo.cx{color:#a00}
 .crn{color:#080;font-weight:bold}.crl{font-size:14px;color:#080;font-weight:bold;border:1px solid #080;border-radius:4px;padding:1px 6px;margin-left:6px}
@@ -486,12 +486,14 @@ tr{page-break-inside:avoid}td,th{padding:4px 6px}#fcb{height:60px}tr.ft td{font-
 """
 
 JS = r"""var CATS=__CATS__;
+var LABELS=__LABELS__;
+function labelOf(name){return (LABELS&&LABELS[name])||name}
 function closeDD(){document.querySelectorAll('.dd').forEach(function(d){d.remove()})}
 function markEdited(el,v,orig,cls){
-  if(v===orig){el.textContent=orig;return false}
+  if(v===orig){el.textContent=labelOf(orig);return false}
   el.textContent='';
-  var n=document.createElement('span');n.className='edited '+cls;n.textContent=v;el.appendChild(n);
-  if(orig){var s=document.createElement('s');s.className='orig';s.textContent=orig;el.appendChild(s)}
+  var n=document.createElement('span');n.className='edited '+cls;n.textContent=labelOf(v);el.appendChild(n);
+  if(orig){var s=document.createElement('s');s.className='orig';s.textContent=labelOf(orig);el.appendChild(s)}
   return true}
 function openCat(td,ev){
   if(ev.target.closest('.dd'))return;
@@ -501,12 +503,13 @@ function openCat(td,ev){
   CATS.forEach(function(o){
     var item=document.createElement('div');
     item.className='ddo'+(o===(td.getAttribute('data-cur')||'')?' cur':'');
-    item.textContent=o;d.appendChild(item)});
+    item.setAttribute('data-account', o);
+    item.textContent=labelOf(o);d.appendChild(item)});
   var cx=document.createElement('div');cx.className='ddo cx';cx.textContent='Cancel';d.appendChild(cx);
   d.addEventListener('click',function(e){
     e.stopPropagation();
     var o=e.target.closest('.ddo');if(!o)return;
-    if(!o.classList.contains('cx'))setCat(td,o.textContent);
+    if(!o.classList.contains('cx'))setCat(td,o.getAttribute('data-account'));
     closeDD()});
   td.appendChild(d)}
 function setCat(td,v){
@@ -638,10 +641,10 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
         current, original, edited = category_view(r, categories)
         shown = current or original
         if edited and not credit:
-            strike = f"<s class='orig'>{esc(original)}</s>" if original and original != current else ''
-            inner = f"<span class='edited ed-cat'>{esc(current)}</span>{strike}"
+            strike = f"<s class='orig'>{esc(summary.display_category(original))}</s>" if original and original != current else ''
+            inner = f"<span class='edited ed-cat'>{esc(summary.display_category(current))}</span>{strike}"
         else:
-            inner = esc(shown)
+            inner = esc(summary.display_category(shown))
         cat_cls = '' if credit or locked else " class='cat'"
         cat_click = '' if credit or locked else " onclick='openCat(this,event)'"
         cat_action = '' if credit or locked else f" data-action='/v/{token}/category/{rid}'"
@@ -685,7 +688,8 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
                      f"<button class='prt' type='button' onclick='window.print()'>Print</button>")
     else:
         parts.append("<button class='prt' type='button' onclick='window.print()'>Print</button>")
-    script = JS.replace('__CATS__', json.dumps(list(AMEX_CATEGORIES)))
+    script = (JS.replace('__CATS__', json.dumps(list(AMEX_CATEGORIES)))
+              .replace('__LABELS__', json.dumps(summary.DISPLAY_NAMES)))
     parts.append(popup_html() + f"<script>{script}</script></div></body></html>")
     return ''.join(parts)
 def nice(ts):
@@ -946,17 +950,36 @@ def read_grid_doc(stmt):
     return doc
 
 def read_grid(stmt):
-    """Saved grid amounts in cents, or None when this statement has no saved edit."""
+    """Saved grid amounts in cents, or None when this statement has no saved edit.
+
+    A file still keyed by the previous category names is rewritten onto the
+    QuickBooks accounts. Who saved it, and when, stay as they were.
+    """
     doc = read_grid_doc(stmt)
     if not doc:
         return None
-    out = {}
+    raw = {}
     for name, cents in doc['amounts'].items():
         try:
-            out[str(name)] = int(cents)
+            raw[str(name)] = int(cents)
         except (TypeError, ValueError):
             return None
-    return out
+    migrated = summary.migrate_saved_amounts(raw)
+    if migrated != raw:
+        path = grid_path(stmt)
+        payload = {
+            'stmt': doc.get('stmt') or stmt,
+            'by': doc.get('by') or '',
+            'ts': doc.get('ts') or '',
+            'amounts': migrated,
+        }
+        text = json.dumps(payload, indent=1) + '\n'
+        with LOCK:
+            with open(path, 'w') as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+    return migrated
 
 def write_grid(stmt, amounts, actor):
     path = grid_path(stmt)
@@ -1184,7 +1207,8 @@ def render_summary_page(built, actor, qb):
                      f"<b>Amex statement total</b> {summary.format_money(built['statement_cents'])}</p>")
         parts.append("<table id='category-grid'><tr><th>Category</th><th>Amount</th></tr>")
         for name, cents in built['categories']:
-            parts.append(f"<tr><td>{esc(name)}</td><td class='n'>{summary.format_money(cents)}</td></tr>")
+            parts.append(f"<tr><td>{esc(summary.display_category(name))}</td>"
+                         f"<td class='n'>{summary.format_money(cents)}</td></tr>")
         parts.append(f"<tr><td><b>Running sum</b></td><td class='n' id='running-sum'>"
                      f"{summary.format_money(built['grid_cents'])}</td></tr></table>")
         parts.append(f"<p class='sent' id='sent'>Sent for posting</p><p id='sent-when'>{when} by {esc(qb.get('by') or '')}.</p>")
@@ -1198,7 +1222,7 @@ def render_summary_page(built, actor, qb):
         parts.append("<table><tr><th>Category</th><th>Amount</th></tr>")
         for name, cents in built['categories']:
             shown = summary.format_money(cents)
-            parts.append(f"<tr><td>{esc(name)}</td><td class='n'>"
+            parts.append(f"<tr><td>{esc(summary.display_category(name))}</td><td class='n'>"
                          f"<input type='hidden' name='cat' value='{esc(name)}'>"
                          f"<input class='amt' name='amt' data-category='{esc(name)}' value='{esc(shown)}' "
                          f"inputmode='decimal' autocomplete='off'></td></tr>")

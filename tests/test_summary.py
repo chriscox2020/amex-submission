@@ -153,14 +153,17 @@ class SummaryTest(unittest.TestCase):
         return found
 
     def test_final_category_edit_wins(self):
-        self.assertEqual(summary.final_category({'id': 1, 'category': 'Meals'}, {1: 'Entertainment'}), 'Entertainment')
-        self.assertEqual(summary.final_category({'id': 1, 'category': 'Meals'}, {}), 'Meals')
+        self.assertEqual(summary.final_category({'id': 1, 'category': 'Meals'}, {1: 'Entertainment'}), 'Meals and Entertainment')
+        self.assertEqual(summary.final_category({'id': 1, 'category': 'Meals'}, {}), 'Meals and Entertainment')
         self.assertEqual(summary.final_category({'id': 2, 'category': ' travel '}, {}), 'Travel')
-        self.assertEqual(summary.final_category({'id': 3, 'category': 'Restaurant'}, {3: ''}), 'Other')
-        self.assertEqual(summary.final_category({'id': 4, 'category': 'Restaurant'}, {}), 'Meals')
+        self.assertEqual(summary.final_category({'id': 3, 'category': 'Restaurant'}, {3: ''}), 'Other General and Admin Expenses')
+        self.assertEqual(summary.final_category({'id': 4, 'category': 'Restaurant'}, {}), 'Meals and Entertainment')
         self.assertEqual(summary.final_category({'id': 5, 'category': 'Merchandise & Supplies'}, {}), 'Supplies')
         self.assertEqual(summary.final_category({'id': 6, 'category': 'Office supplies'}, {}), 'Supplies')
-        self.assertEqual(summary.final_category({'id': 7, 'category': 'Transportation'}, {}), 'Other')
+        self.assertEqual(summary.final_category({'id': 7, 'category': 'Transportation'}, {}), 'Other General and Admin Expenses')
+        self.assertEqual(summary.final_category({'id': 8, 'category': 'Fuel'}, {}), 'Travel Fuel')
+        self.assertEqual(summary.final_category({'id': 9, 'category': 'Software'}, {}), 'Office Expenses:Software')
+        self.assertEqual(summary.final_category({'id': 10, 'category': 'Parts & Materials'}, {}), 'Job Materials')
         self.assertEqual(tuple(app.AMEX_CATEGORIES), summary.CATEGORIES)
         period = summary.statement_period({'stmt': '2026-10-22'})
         self.assertEqual(period['month_label'], 'October 2026')
@@ -193,7 +196,7 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn('save-categories', ada_page)
         self.assertNotIn('qb-confirm', ada_page)
         self.assertNotIn("id='amex-total'", ada_page)
-        self.assertIn(">Meals<", ada_page)
+        self.assertIn(">Meals and Entertainment<", ada_page)
         self.assertIn(">Travel<", ada_page)
         self.assertIn(">Supplies<", ada_page)
         self.assertNotIn('Restaurant', ada_page)
@@ -236,7 +239,7 @@ class SummaryTest(unittest.TestCase):
             if i:
                 prev = f"data-category='{html.escape(summary.CATEGORIES[i - 1])}'"
                 self.assertLess(waiting.index(prev), waiting.index(token))
-        self.assertEqual(summary.CATEGORIES[-1], 'Other')
+        self.assertEqual(summary.CATEGORIES[-1], 'Other General and Admin Expenses')
         self.assertNotIn('Restaurant', waiting)
         self.assertNotIn('Merchandise', waiting)
         self.assertNotIn('Office Supplies', waiting)
@@ -251,16 +254,19 @@ class SummaryTest(unittest.TestCase):
         partial = self.page()
         self.assertIn('Submitted Oct 21, 2026 9:30 AM CT', partial)
         self.assertIn('>Ben</td><td><b style=\'color:#c62828\'>Not submitted</b>', partial)
-        self.assertIn('Entertainment', partial)
-        self.assertIn('$5.00', partial)
+        self.assertIn('Meals and Entertainment', partial)
+        self.assertIn('$15.00', partial)
         self.assertIn('Category total $14.00 does not match the Amex statement total $17.50. Difference: $3.50.', partial)
         self.assertIn("id='qb-submit' disabled", partial)
         built = summary.build_summary(app.load_statements()[AUG], app.state)
         totals = dict(built['categories'])
-        self.assertEqual(totals['Entertainment'], 500)
+        self.assertEqual(totals['Meals and Entertainment'], 1500)
         self.assertEqual(totals['Travel'], 0)
-        self.assertEqual(totals['Meals'], 1000)
+        self.assertEqual(totals['Travel Fuel'], 0)
         self.assertEqual(totals['Supplies'], -100)
+        self.assertNotIn('Entertainment', totals)
+        self.assertNotIn('Fuel', totals)
+        self.assertNotIn('Meals', totals)
         self.assertNotIn('Restaurant', totals)
         self.assertNotIn('Merchandise & Supplies', totals)
         self.assertEqual(list(totals), list(summary.CATEGORIES))
@@ -285,7 +291,7 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(built['ready'])
         self.assertEqual(built['summary_cents'], 1750)
         self.assertEqual(dict(built['categories'])['Supplies'], 250)
-        self.assertEqual(dict(built['categories'])['Meals'], 1000)
+        self.assertEqual(dict(built['categories'])['Meals and Entertainment'], 1500)
         self.assertEqual(built['period']['close_date'], '2026-08-22')
         self.assertEqual(built['period']['month_label'], 'August 2026')
 
@@ -314,8 +320,9 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(rec['to'], 'littledude@mail.grokbot.com')
         self.assertEqual(rec['summary_total'], 17.5)
         self.assertEqual(rec['statement_total'], 17.5)
-        self.assertEqual(rec['categories']['Entertainment'], 5.0)
+        self.assertEqual(rec['categories']['Meals and Entertainment'], 15.0)
         self.assertEqual(rec['categories']['Travel'], 0.0)
+        self.assertEqual(rec['categories']['Travel Fuel'], 0.0)
         self.assertTrue(str(rec['email_status']).startswith('dryrun:'))
         self.assertTrue(str(rec['files']).endswith('/summaries/American Express charges August 2026'))
         self.assertEqual(rec['folder'], 'American Express charges August 2026')
@@ -345,7 +352,8 @@ class SummaryTest(unittest.TestCase):
                 html_body = part.get_payload(decode=True).decode()
         self.assertEqual(set(files), {pdf_name, xlsx_name, 'ada-submission.json', 'ben-submission.json'})
         self.assertTrue(files[pdf_name].startswith(b'%PDF'))
-        self.assertIn(b'Entertainment', files[pdf_name])
+        self.assertIn(b'Meals and Entertainment: $15.00', files[pdf_name])
+        self.assertIn(b'Office Expenses:Software: $0.00', files[pdf_name])
         self.assertIn('American Express charges August 2026', text)
         self.assertIn('did not contact QuickBooks or Dropbox', text)
         self.assertIn('did not contact QuickBooks or Dropbox', html_body)
@@ -355,18 +363,24 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(block['folder'], 'American Express charges August 2026')
         self.assertEqual(block['grand_total'], 17.5)
         self.assertEqual(block['statement_total'], 17.5)
-        self.assertEqual(block['categories']['Entertainment'], 5.0)
-        self.assertEqual(block['categories']['Fuel'], 0.0)
+        self.assertEqual(block['categories']['Meals and Entertainment'], 15.0)
+        self.assertEqual(block['categories']['Travel Fuel'], 0.0)
+        self.assertEqual(block['categories']['Auto Allowance:Fuel'], 0.0)
         self.assertNotIn('Communications', block['categories'])
+        self.assertNotIn('Fuel', block['categories'])
+        self.assertNotIn('Entertainment', block['categories'])
         for name in summary.CATEGORIES:
             self.assertIn(name, block['categories'])
         self.assertEqual(list(block['categories']), list(summary.CATEGORIES))
+        self.assertEqual([row['account'] for row in block['accounts']], list(summary.CATEGORIES))
+        self.assertEqual(block['accounts'][2], {'account': 'Auto Allowance:Fuel', 'amount': 0.0})
+        self.assertEqual(block['accounts'][5], {'account': 'Office Expenses:Software', 'amount': 0.0})
         self.assertNotIn('Office Supplies', block['categories'])
         self.assertNotIn('Restaurant', block['categories'])
         ada = json.loads(files['ada-submission.json'])
         air = next(c for c in ada['charges'] if c['merchant'] == 'AIR')
         self.assertEqual(air['original_category'], 'Travel')
-        self.assertEqual(air['final_category'], 'Entertainment')
+        self.assertEqual(air['final_category'], 'Meals and Entertainment')
 
         for name in (pdf_name, xlsx_name, csv_name):
             self.assertTrue((folder / name).is_file())
@@ -375,14 +389,18 @@ class SummaryTest(unittest.TestCase):
         pdf = (folder / pdf_name).read_bytes()
         self.assertTrue(pdf.startswith(b'%PDF-1.4'))
         self.assertIn(b'%%EOF', pdf)
-        self.assertIn(b'Entertainment: $5.00', pdf)
+        self.assertIn(b'Meals and Entertainment: $15.00', pdf)
+        self.assertIn(b'Auto Allowance:Fuel: $0.00', pdf)
         csv_text = (folder / csv_name).read_text()
-        self.assertIn('Entertainment', csv_text)
+        self.assertIn('Meals and Entertainment', csv_text)
+        self.assertIn('Auto Allowance:Fuel', csv_text)
+        self.assertIn('QuickBooks account', csv_text)
         self.assertIn('Grand total', csv_text)
         with zipfile.ZipFile(folder / xlsx_name) as zf:
             sheet = zf.read('xl/worksheets/sheet1.xml').decode()
         self.assertIn('American Express charges August 2026', sheet)
-        self.assertIn('Entertainment', sheet)
+        self.assertIn('Meals and Entertainment', sheet)
+        self.assertIn('Office Expenses:Software', sheet)
         self.assertIn('2.50', sheet)
 
         downloaded = self.auth_get(f'/admin/summary/{AUG}/summary.pdf')
@@ -405,7 +423,7 @@ class SummaryTest(unittest.TestCase):
                                    headers={'Accept': 'application/json'})
         self.assertEqual(flagged.status_code, 409)
         self.assertEqual(flagged.get_json()['error'], 'month locked')
-        self.assertEqual(self.client.post(f'/v/{self.ada}/category/1', data={'category': 'Other'},
+        self.assertEqual(self.client.post(f'/v/{self.ada}/category/1', data={'category': 'Other General and Admin Expenses'},
                                           headers={'Accept': 'application/json'}).status_code, 409)
         self.assertEqual(self.client.post(f'/v/{self.ada}/comment', data={'comment': 'nope'},
                                           headers={'Accept': 'application/json'}).status_code, 409)
@@ -538,15 +556,22 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary.parse_money_cents('0'), 0)
         with self.assertRaises(ValueError):
             summary.parse_money_cents('12.345')
-        self.assertEqual(summary.grid_category_name(' fuel '), 'Fuel')
+        self.assertEqual(summary.grid_category_name(' fuel '), 'Travel Fuel')
         self.assertEqual(summary.grid_category_name('travel'), 'Travel')
-        self.assertEqual(summary.grid_category_name('Restaurant'), 'Meals')
+        self.assertEqual(summary.grid_category_name('Restaurant'), 'Meals and Entertainment')
+        self.assertEqual(summary.grid_category_name('Meals'), 'Meals and Entertainment')
+        self.assertEqual(summary.grid_category_name('Entertainment'), 'Meals and Entertainment')
         self.assertEqual(summary.grid_category_name('Merchandise & Supplies'), 'Supplies')
         self.assertEqual(summary.grid_category_name('Office supplies'), 'Supplies')
-        self.assertEqual(summary.grid_category_name('Transportation'), 'Other')
-        self.assertEqual(summary.grid_category_name('Business Services'), 'Other')
-        self.assertEqual(summary.grid_category_name('Communications'), 'Other')
-        self.assertEqual(summary.grid_category_name('Parking'), 'Other')
+        self.assertEqual(summary.grid_category_name('Software'), 'Office Expenses:Software')
+        self.assertEqual(summary.grid_category_name('Office Expenses Software'), 'Office Expenses:Software')
+        self.assertEqual(summary.grid_category_name('Parts & Materials'), 'Job Materials')
+        self.assertEqual(summary.grid_category_name('Auto Allowance Fuel'), 'Auto Allowance:Fuel')
+        self.assertEqual(summary.grid_category_name('Transportation'), 'Other General and Admin Expenses')
+        self.assertEqual(summary.grid_category_name('Business Services'), 'Other General and Admin Expenses')
+        self.assertEqual(summary.grid_category_name('Communications'), 'Other General and Admin Expenses')
+        self.assertEqual(summary.grid_category_name('Parking'), 'Other General and Admin Expenses')
+        self.assertEqual(summary.grid_category_name('Other'), 'Other General and Admin Expenses')
         self.assertIsNone(summary.lookup_category('Not A Real Category'))
         people = [{
             'submitted': True,
@@ -561,19 +586,21 @@ class SummaryTest(unittest.TestCase):
         names = [name for name, _cents in rows]
         self.assertEqual(names, list(summary.CATEGORIES))
         amounts = dict(rows)
-        self.assertEqual(amounts['Meals'], 1000)
-        self.assertEqual(amounts['Fuel'], 250)
+        self.assertEqual(amounts['Meals and Entertainment'], 1000)
+        self.assertEqual(amounts['Travel Fuel'], 250)
         self.assertEqual(amounts['Travel'], 0)
         self.assertEqual(amounts['Supplies'], 40)
-        self.assertEqual(amounts['Other'], 75)
+        self.assertEqual(amounts['Other General and Admin Expenses'], 75)
+        self.assertEqual(amounts['Auto Allowance:Fuel'], 0)
         self.assertNotIn('Parking', amounts)
         self.assertNotIn('Restaurant', amounts)
         self.assertNotIn('Merchandise & Supplies', amounts)
+        self.assertNotIn('Fuel', amounts)
         self.assertEqual(total, 1365)
         edited, edited_total = summary.category_grid(people, {'fuel': 500, 'Software': 10, 'Restaurant': 300})
-        self.assertEqual(dict(edited)['Fuel'], 500)
-        self.assertEqual(dict(edited)['Software'], 10)
-        self.assertEqual(dict(edited)['Meals'], 300)
+        self.assertEqual(dict(edited)['Travel Fuel'], 500)
+        self.assertEqual(dict(edited)['Office Expenses:Software'], 10)
+        self.assertEqual(dict(edited)['Meals and Entertainment'], 300)
         self.assertEqual(names, [name for name, _cents in edited])
         self.assertEqual(edited_total, 300 + 500 + 40 + 75 + 10)
 
@@ -582,23 +609,27 @@ class SummaryTest(unittest.TestCase):
         self.submit_employee(self.ben)
         built = summary.build_summary(app.load_statements()[AUG], app.state)
         amounts = [(name, cents / 100) for name, cents in built['categories']]
-        amounts = [(name, 4.25 if name == 'Meals' else dollars) for name, dollars in amounts]
+        amounts = [(name, 4.25 if name == 'Meals and Entertainment' else dollars) for name, dollars in amounts]
         saved = self.post_grid(amounts, user='Meghan')
         self.assertEqual(saved.status_code, 303)
         page = self.page()
-        self.assertIn("data-category='Meals' value='$4.25'", page)
+        self.assertIn("data-category='Meals and Entertainment' value='$4.25'", page)
+        self.assertIn('>Auto Allowance Fuel</td>', page)
+        self.assertIn("value='Auto Allowance:Fuel'", page)
+        self.assertIn('>Office Expenses Software</td>', page)
+        self.assertIn("value='Office Expenses:Software'", page)
         self.assertIn("id='grid-saved'>Saved Oct 21, 2026 9:30 AM CT by Meghan.", page)
-        self.assertIn('Category total $11.75 does not match the Amex statement total $17.50. Difference: $5.75.', page)
+        self.assertIn('Category total $6.75 does not match the Amex statement total $17.50. Difference: $10.75.', page)
         self.assertIn("id='qb-submit' disabled", page)
         again = self.page(user='Chris')
-        self.assertIn("data-category='Meals' value='$4.25'", again)
+        self.assertIn("data-category='Meals and Entertainment' value='$4.25'", again)
         grid_file = pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json')
         stored = json.loads(grid_file.read_text())
         self.assertEqual(stored['by'], 'Meghan')
-        self.assertEqual(stored['amounts']['Meals'], 425)
+        self.assertEqual(stored['amounts']['Meals and Entertainment'], 425)
         self.assertEqual(stored['stmt'], AUG)
         other = self.page(JUL)
-        self.assertIn("data-category='Meals' value='$0.00'", other)
+        self.assertIn("data-category='Meals and Entertainment' value='$0.00'", other)
         self.assertFalse(pathlib.Path(app.DATA_DIR, 'summary-grids', JUL + '.json').exists())
         self.assertNotIn('$4.25', other)
         logs = [r for r in app.read_log() if r['type'] == 'summary_grid']
@@ -609,13 +640,67 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(repeat.status_code, 303)
         self.assertEqual(len([r for r in app.read_log() if r['type'] == 'summary_grid']), 1)
 
+    def test_saved_grid_migrates_old_names(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        path = pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = {
+            'stmt': AUG,
+            'by': 'Chris',
+            'ts': '2026-10-01T12:00:00-05:00',
+            'amounts': {
+                'Travel': 100,
+                'Fuel': 200,
+                'Meals': 300,
+                'Supplies': 400,
+                'Parts & Materials': 500,
+                'Software': 600,
+                'Entertainment': 700,
+                'Other': 800,
+            },
+        }
+        path.write_text(json.dumps(old, indent=1) + '\n')
+        page = self.page()
+        self.assertIn("data-category='Travel' value='$1.00'", page)
+        self.assertIn("data-category='Travel Fuel' value='$2.00'", page)
+        self.assertIn("data-category='Auto Allowance:Fuel' value='$0.00'", page)
+        self.assertIn("data-category='Meals and Entertainment' value='$10.00'", page)
+        self.assertIn("data-category='Supplies' value='$4.00'", page)
+        self.assertIn("data-category='Office Expenses:Software' value='$6.00'", page)
+        self.assertIn("data-category='Job Materials' value='$5.00'", page)
+        self.assertIn("data-category='Other General and Admin Expenses' value='$8.00'", page)
+        self.assertIn('>Auto Allowance Fuel</td>', page)
+        self.assertIn('>Office Expenses Software</td>', page)
+        stored = json.loads(path.read_text())
+        self.assertEqual(stored['by'], 'Chris')
+        self.assertEqual(stored['ts'], '2026-10-01T12:00:00-05:00')
+        self.assertEqual(stored['stmt'], AUG)
+        self.assertEqual(stored['amounts'], {
+            'Travel': 100,
+            'Travel Fuel': 200,
+            'Meals and Entertainment': 1000,
+            'Supplies': 400,
+            'Job Materials': 500,
+            'Office Expenses:Software': 600,
+            'Other General and Admin Expenses': 800,
+        })
+        self.assertNotIn('Fuel', stored['amounts'])
+        self.assertNotIn('Meals', stored['amounts'])
+        self.assertNotIn('Entertainment', stored['amounts'])
+        self.assertEqual(json.loads(path.read_text()), stored)
+        self.assertEqual([r for r in app.read_log() if r['type'] == 'summary_grid'], [])
+        self.assertEqual([r for r in app.read_log() if r.get('kind') == 'summary_grid'], [])
+
     def test_explicit_save_emails_the_grid_record(self):
         self.submit_employee(self.ada, 'Entertainment', 2)
         for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
             path.unlink()
         amounts = [
-            ('Travel', 0), ('Fuel', 0), ('Meals', 10), ('Supplies', -1),
-            ('Parts & Materials', 0), ('Software', 0), ('Entertainment', 5), ('Other', 0),
+            ('Travel', 0), ('Travel Fuel', 0), ('Auto Allowance:Fuel', 0),
+            ('Meals and Entertainment', 15), ('Supplies', -1),
+            ('Office Expenses:Software', 0), ('Job Materials', 0),
+            ('Other General and Admin Expenses', 0),
         ]
         auto = self.client.post(
             f'/admin/summary/{AUG}/categories',
@@ -659,13 +744,13 @@ class SummaryTest(unittest.TestCase):
             "\n"
             "Category | Amount\n"
             "Travel | $0.00\n"
-            "Fuel | $0.00\n"
-            "Meals | $10.00\n"
+            "Travel Fuel | $0.00\n"
+            "Auto Allowance:Fuel | $0.00\n"
+            "Meals and Entertainment | $15.00\n"
             "Supplies | -$1.00\n"
-            "Parts & Materials | $0.00\n"
-            "Software | $0.00\n"
-            "Entertainment | $5.00\n"
-            "Other | $0.00\n"
+            "Office Expenses:Software | $0.00\n"
+            "Job Materials | $0.00\n"
+            "Other General and Admin Expenses | $0.00\n"
             "Grand total | $14.00\n"
             "\n"
         )
@@ -697,12 +782,12 @@ class SummaryTest(unittest.TestCase):
         def boom(_msg):
             raise OSError('smtp down')
         app.send_prepared = boom
-        changed = [(name, 2 if name == 'Fuel' else dollars) for name, dollars in amounts]
+        changed = [(name, 2 if name == 'Travel Fuel' else dollars) for name, dollars in amounts]
         failed = self.post_grid(changed, user='Chris')
         self.assertEqual(failed.status_code, 303)
         stored = json.loads(grid_file.read_text())
         self.assertEqual(stored['by'], 'Chris')
-        self.assertEqual(stored['amounts']['Fuel'], 200)
+        self.assertEqual(stored['amounts']['Travel Fuel'], 200)
         self.assertEqual(stored['stmt'], AUG)
         err = [r for r in app.read_log() if r.get('kind') == 'summary_grid'][-1]
         self.assertEqual(err['status'], 'error: OSError: smtp down')
@@ -713,7 +798,7 @@ class SummaryTest(unittest.TestCase):
             if part.get_content_type() == 'text/plain':
                 kept_text = part.get_payload(decode=True).decode()
         self.assertIn('Supplies | -$1.00', kept_text)
-        self.assertNotIn('Fuel | $2.00', kept_text)
+        self.assertNotIn('Travel Fuel | $2.00', kept_text)
 
         app.send_prepared = self._send
         app.RECORD_CC = 'chris@coxresearch.com'
@@ -737,15 +822,16 @@ class SummaryTest(unittest.TestCase):
         for name, _cents in built['categories']:
             if name == 'Travel':
                 amounts.append((name, 10))
-            elif name == 'Fuel':
+            elif name == 'Travel Fuel':
                 amounts.append((name, 7.5))
             else:
                 amounts.append((name, 0))
         self.assertEqual(self.post_grid(amounts).status_code, 303)
         edited = self.page()
         self.assertIn("data-category='Travel' value='$10.00'", edited)
-        self.assertIn("data-category='Fuel' value='$7.50'", edited)
-        self.assertIn("data-category='Entertainment' value='$0.00'", edited)
+        self.assertIn("data-category='Travel Fuel' value='$7.50'", edited)
+        self.assertIn("data-category='Meals and Entertainment' value='$0.00'", edited)
+        self.assertIn("value='Auto Allowance:Fuel'", edited)
         self.assertNotIn("id='summary-warning'", edited)
         self.assertIn("id='qb-submit'>Submit to QuickBooks for Pay", edited)
         blocked = self.client.post(
@@ -756,7 +842,7 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(blocked.status_code, 400)
         bad_amount = self.client.post(
             f'/admin/summary/{AUG}/categories',
-            data={'cat': 'Fuel', 'amt': 'nope'},
+            data={'cat': 'Travel Fuel', 'amt': 'nope'},
             auth=('Chris', 'local-admin'),
         )
         self.assertEqual(bad_amount.status_code, 400)
@@ -764,9 +850,11 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(sent.status_code, 303)
         rec = next(r for r in app.read_log() if r['type'] == 'qb_submit')
         self.assertEqual(rec['categories']['Travel'], 10.0)
-        self.assertEqual(rec['categories']['Fuel'], 7.5)
-        self.assertEqual(rec['categories']['Entertainment'], 0.0)
-        self.assertEqual(rec['categories']['Meals'], 0.0)
+        self.assertEqual(rec['categories']['Travel Fuel'], 7.5)
+        self.assertEqual(rec['categories']['Meals and Entertainment'], 0.0)
+        self.assertEqual(rec['categories']['Office Expenses:Software'], 0.0)
+        self.assertNotIn('Fuel', rec['categories'])
+        self.assertNotIn('Entertainment', rec['categories'])
         self.assertNotIn('Restaurant', rec['categories'])
         self.assertNotIn('Office Supplies', rec['categories'])
         self.assertNotIn('Merchandise & Supplies', rec['categories'])
@@ -783,17 +871,19 @@ class SummaryTest(unittest.TestCase):
                 text = part.get_payload(decode=True).decode()
         block = json.loads(text[text.index('{'):text.rindex('}') + 1])
         self.assertEqual(block['categories']['Travel'], 10.0)
-        self.assertEqual(block['categories']['Fuel'], 7.5)
-        self.assertEqual(block['categories']['Entertainment'], 0.0)
+        self.assertEqual(block['categories']['Travel Fuel'], 7.5)
+        self.assertEqual(block['categories']['Meals and Entertainment'], 0.0)
+        self.assertEqual(block['accounts'][1], {'account': 'Travel Fuel', 'amount': 7.5})
         self.assertEqual(block['grand_total'], 17.5)
         self.assertEqual(block['statement_total'], 17.5)
         pdf_name = 'American Express charges August 2026 - Summary.pdf'
         self.assertIn(b'Travel: $10.00', files[pdf_name])
-        self.assertIn(b'Fuel: $7.50', files[pdf_name])
-        self.assertIn(b'Entertainment: $0.00', files[pdf_name])
+        self.assertIn(b'Travel Fuel: $7.50', files[pdf_name])
+        self.assertIn(b'Meals and Entertainment: $0.00', files[pdf_name])
+        self.assertIn(b'Auto Allowance:Fuel: $0.00', files[pdf_name])
         ada = json.loads(files['ada-submission.json'])
         air = next(c for c in ada['charges'] if c['merchant'] == 'AIR')
-        self.assertEqual(air['final_category'], 'Entertainment')
+        self.assertEqual(air['final_category'], 'Meals and Entertainment')
         self.assertEqual(air['original_category'], 'Travel')
         locked = self.post_grid(amounts)
         self.assertEqual(locked.status_code, 409)
@@ -814,17 +904,20 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(refused.get_json()['error'], 'not ready')
         self.assertEqual(refused.get_json()['difference'], -82.5)
         self.assertEqual(self.qb_messages(), [])
-        fixed = [(name, 17.5 if name == 'Software' else 0) for name, _cents in built['categories']]
+        fixed = [(name, 17.5 if name == 'Office Expenses:Software' else 0) for name, _cents in built['categories']]
         self.assertEqual(self.post_grid(fixed, user='Meghan').status_code, 303)
         ready = self.page(user='meghan')
         self.assertNotIn("id='summary-warning'", ready)
-        self.assertIn("data-category='Software' value='$17.50'", ready)
+        self.assertIn("data-category='Office Expenses:Software' value='$17.50'", ready)
+        self.assertIn('>Office Expenses Software</td>', ready)
         sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit', user='Meghan')
         self.assertEqual(sent.status_code, 303)
         rec = next(r for r in app.read_log() if r['type'] == 'qb_submit')
         self.assertEqual(rec['by'], 'Meghan')
-        self.assertEqual(rec['categories']['Software'], 17.5)
-        self.assertEqual(rec['categories']['Entertainment'], 0.0)
+        self.assertEqual(rec['categories']['Office Expenses:Software'], 17.5)
+        self.assertEqual(rec['categories']['Meals and Entertainment'], 0.0)
+        self.assertNotIn('Software', rec['categories'])
+        self.assertNotIn('Entertainment', rec['categories'])
 
     def test_matching_grid_still_waits_for_every_employee(self):
         self.submit_employee(self.ada)

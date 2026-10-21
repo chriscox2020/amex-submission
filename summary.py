@@ -9,22 +9,45 @@ import csv, io, json, re, zipfile
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-# One list for the employee category picker and the summary grid, in this order.
-CATEGORIES = ('Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
-              'Software', 'Entertainment', 'Other')
+# QuickBooks account names, shared by the summary grid and the employee picker.
+# This order is the grid order and the picker order.
+CATEGORIES = (
+    'Travel',
+    'Travel Fuel',
+    'Auto Allowance:Fuel',
+    'Meals and Entertainment',
+    'Supplies',
+    'Office Expenses:Software',
+    'Job Materials',
+    'Other General and Admin Expenses',
+)
 ACCOUNTING_CATEGORIES = CATEGORIES
-# Retired Amex names. Restaurant is meals. Merchandise & Supplies and Office
-# Supplies are supplies. Anything else that is not in CATEGORIES rolls into Other.
+# On-screen labels. The stored value and the QuickBooks email use CATEGORIES.
+DISPLAY_NAMES = {
+    'Auto Allowance:Fuel': 'Auto Allowance Fuel',
+    'Office Expenses:Software': 'Office Expenses Software',
+}
+# Previous list and retired Amex names. Fuel lands on Travel Fuel, not Auto Allowance.
+# Meals and Entertainment both land on Meals and Entertainment. Anything else is the last row.
 LEGACY_TO_CATEGORY = {
-    'restaurant': 'Meals',
+    'travel': 'Travel',
+    'fuel': 'Travel Fuel',
+    'meals': 'Meals and Entertainment',
+    'entertainment': 'Meals and Entertainment',
+    'supplies': 'Supplies',
+    'software': 'Office Expenses:Software',
+    'parts & materials': 'Job Materials',
+    'other': 'Other General and Admin Expenses',
+    'restaurant': 'Meals and Entertainment',
     'merchandise & supplies': 'Supplies',
     'office supplies': 'Supplies',
-    'transportation': 'Other',
-    'business services': 'Other',
-    'communications': 'Other',
-    'uncategorized': 'Other',
+    'transportation': 'Other General and Admin Expenses',
+    'business services': 'Other General and Admin Expenses',
+    'communications': 'Other General and Admin Expenses',
+    'uncategorized': 'Other General and Admin Expenses',
 }
-UNCATEGORIZED = 'Other'
+UNCATEGORIZED = 'Other General and Admin Expenses'
+_DISPLAY_KEYS = {label.casefold(): account for account, label in DISPLAY_NAMES.items()}
 
 
 def to_cents(amount):
@@ -37,27 +60,46 @@ def format_money(cents):
     return f'{sign}${cents // 100:,}.{cents % 100:02d}'
 
 
-def lookup_category(value):
-    """A kept category name, or None when the text is blank or not a known name.
+def display_category(name):
+    """Screen label. The QuickBooks account name is unchanged."""
+    return DISPLAY_NAMES.get(name, name)
 
-    Known legacy Amex names map onto the shared list. Unknown text is None so a
-    typed picker value can be rejected, while the grid rolls unknowns into Other.
+
+def lookup_category(value):
+    """A QuickBooks account name, or None when the text is blank or not a known name.
+
+    Old grid names and retired Amex names map onto the account list. Unknown text
+    is None so a typed picker value can be rejected, while the grid rolls unknowns
+    into Other General and Admin Expenses.
     """
     raw = str(value or '').strip()
     key = raw.casefold()
     if not key:
         return None
-    if key in LEGACY_TO_CATEGORY:
-        return LEGACY_TO_CATEGORY[key]
     for name in CATEGORIES:
         if name.casefold() == key:
             return name
+    if key in _DISPLAY_KEYS:
+        return _DISPLAY_KEYS[key]
+    if key in LEGACY_TO_CATEGORY:
+        return LEGACY_TO_CATEGORY[key]
     return None
 
 
 def grid_category_name(value):
-    """Shared category for the grid and for charge display. Unknowns roll into Other."""
-    return lookup_category(value) or 'Other'
+    """QuickBooks account for the grid and for charge display. Unknowns roll into the last row."""
+    return lookup_category(value) or UNCATEGORIZED
+
+
+def migrate_saved_amounts(saved):
+    """Old saved names become QuickBooks accounts. Amounts that share an account are added."""
+    if not saved:
+        return {}
+    out = {}
+    for name, cents in saved.items():
+        account = grid_category_name(name)
+        out[account] = out.get(account, 0) + int(cents)
+    return out
 
 
 def final_category(row, categories):
@@ -96,12 +138,10 @@ def category_grid(people, saved=None):
 
 
 def resolve_grid(rows, saved):
-    """Overlay saved cents onto the fixed rows. Legacy saved names roll into their row."""
+    """Overlay saved cents onto the fixed rows. Old saved names roll into their account."""
     if not saved:
         return list(rows), sum(cents for _, cents in rows)
-    overrides = {}
-    for name, cents in saved.items():
-        overrides[grid_category_name(name)] = int(cents)
+    overrides = migrate_saved_amounts(saved)
     out = [(name, overrides.get(name, prefill)) for name, prefill in rows]
     return out, sum(cents for _, cents in out)
 
@@ -180,12 +220,19 @@ def build_summary(doc, state_fn, saved=None):
 
 
 def category_payload(summary):
+    categories = {}
+    accounts = []
+    for name, cents in summary['categories']:
+        amount = round(cents / 100, 2)
+        categories[name] = amount
+        accounts.append({'account': name, 'amount': amount})
     return {
         'statement': summary['stmt'],
         'close_date': summary['period']['close_date'],
         'month': summary['period']['month_label'],
         'folder': summary['period']['folder_label'],
-        'categories': {name: round(cents / 100, 2) for name, cents in summary['categories']},
+        'categories': categories,
+        'accounts': accounts,
         'grand_total': round(summary['grid_cents'] / 100, 2),
         'statement_total': round(summary['statement_cents'] / 100, 2),
     }
@@ -215,12 +262,12 @@ def submission_record(summary, person):
 
 def summary_table_rows(summary):
     """Rows for the spreadsheet: categories, totals, then who submitted."""
-    rows = [['Category', 'Amount']]
+    rows = [['Category', 'QuickBooks account', 'Amount']]
     for name, cents in summary['categories']:
-        rows.append([name, f'{cents / 100:.2f}'])
-    rows.append(['Grand total', f'{summary["grid_cents"] / 100:.2f}'])
-    rows.append(['Statement total', f'{summary["statement_cents"] / 100:.2f}'])
-    rows.append(['Difference', f'{summary["difference_cents"] / 100:.2f}'])
+        rows.append([display_category(name), name, f'{cents / 100:.2f}'])
+    rows.append(['Grand total', '', f'{summary["grid_cents"] / 100:.2f}'])
+    rows.append(['Statement total', '', f'{summary["statement_cents"] / 100:.2f}'])
+    rows.append(['Difference', '', f'{summary["difference_cents"] / 100:.2f}'])
     rows.append([])
     rows.append(['Employee', 'Submitted', 'When', 'Total'])
     for person in summary['people']:

@@ -81,15 +81,16 @@ with sync_playwright() as p:
     picker_page = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
     picker_page.goto(BASE + f'/v/{ada}')
     assert picker_page.locator('.banner').inner_text() == 'American Express Charges'
-    assert picker_page.locator('td.cat').nth(0).inner_text() == 'Meals'
+    assert picker_page.locator('td.cat').nth(0).inner_text() == 'Meals and Entertainment'
     assert picker_page.locator('td.cat').nth(1).inner_text() == 'Travel'
     assert 'Restaurant' not in picker_page.locator('body').inner_text()
     assert 'Merchandise' not in picker_page.locator('body').inner_text()
     picker_page.locator('td.cat').nth(0).click()
     picker_page.locator('.dd').wait_for(state='visible')
     picker = picker_page.locator('.dd .ddo').all_inner_texts()
-    assert picker == ['Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
-                      'Software', 'Entertainment', 'Other', 'Cancel'], picker
+    assert picker == ['Travel', 'Travel Fuel', 'Auto Allowance Fuel', 'Meals and Entertainment',
+                      'Supplies', 'Office Expenses Software', 'Job Materials',
+                      'Other General and Admin Expenses', 'Cancel'], picker
     picker_page.locator('td.cat').nth(0).scroll_into_view_if_needed()
     picker_page.screenshot(path=str(shots / 'category-picker.png'))
     picker_page.locator('.dd .ddo.cx').click()
@@ -113,10 +114,13 @@ with sync_playwright() as p:
     assert 'Office Supplies' not in pg.locator('body').inner_text()
     grid_names = pg.locator('#category-grid input.amt').evaluate_all(
         "els => els.map(e => e.getAttribute('data-category'))")
-    assert grid_names == ['Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
-                          'Software', 'Entertainment', 'Other'], grid_names
-    assert pg.locator('input[data-category="Fuel"]').input_value() == '$0.00'
-    assert pg.locator('input[data-category="Parts & Materials"]').input_value() == '$0.00'
+    assert grid_names == ['Travel', 'Travel Fuel', 'Auto Allowance:Fuel', 'Meals and Entertainment',
+                          'Supplies', 'Office Expenses:Software', 'Job Materials',
+                          'Other General and Admin Expenses'], grid_names
+    assert pg.locator('td').filter(has_text='Auto Allowance Fuel').first.inner_text() == 'Auto Allowance Fuel'
+    assert pg.locator('td').filter(has_text='Office Expenses Software').first.inner_text() == 'Office Expenses Software'
+    assert pg.locator('input[data-category="Travel Fuel"]').input_value() == '$0.00'
+    assert pg.locator('input[data-category="Job Materials"]').input_value() == '$0.00'
     assert pg.locator('#sent').count() == 0
     with pg.expect_download() as download_info:
         pg.get_by_role('link', name='Download PDF').click()
@@ -135,7 +139,7 @@ with sync_playwright() as p:
     assert phone.locator('#qb-submit').is_disabled()
     assert 'Difference: $17.50.' in phone.locator('#summary-warning').inner_text()
     assert phone.locator('#amex-total').inner_text() == 'Amex statement total $17.50'
-    assert phone.locator('input[data-category="Meals"]').is_visible()
+    assert phone.locator('input[data-category="Meals and Entertainment"]').is_visible()
     assert 'Signed in as Meghan' in phone.locator('body').inner_text()
     phone.screenshot(path=str(shots / 'summary-waiting-mobile.png'), full_page=True)
 
@@ -147,8 +151,7 @@ with sync_playwright() as p:
     assert pg.locator('#qb-confirm').is_hidden()
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
     assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
-    assert pg.locator('input[data-category="Entertainment"]').input_value() == '$5.00'
-    assert pg.locator('input[data-category="Meals"]').input_value() == '$10.00'
+    assert pg.locator('input[data-category="Meals and Entertainment"]').input_value() == '$15.00'
     assert pg.locator('input[data-category="Supplies"]').input_value() == '-$1.00'
     assert pg.locator('#running-sum').inner_text() == '$14.00'
     pg.screenshot(path=str(shots / 'summary-category-grid.png'), full_page=True)
@@ -171,7 +174,7 @@ with sync_playwright() as p:
     pg.locator('#grid-saved').wait_for()
     assert pg.locator('#grid-saved').inner_text() == 'Saved Oct 21, 2026 9:30 AM CT by Chris.'
     assert saved_subjects().count('Amex summary grid SAVED: American Express charges August 2026') == 1
-    fuel = pg.locator('input[data-category="Fuel"]')
+    fuel = pg.locator('input[data-category="Travel Fuel"]')
     fuel.fill('1.00')
     assert pg.locator('#running-sum').inner_text() == '$18.50'
     assert 'Category total $18.50 does not match the Amex statement total $17.50.' in pg.locator('#summary-warning').inner_text()
