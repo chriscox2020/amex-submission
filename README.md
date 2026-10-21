@@ -22,16 +22,17 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   An employee token cannot open any of these.
 * **Monthly summary** for Chris and Meghan only: `/admin/summary` and `/admin/summary/<stmt>`
   (for example `/admin/summary/2026-09-22`). Same username and `ADMIN_PASSWORD`. The username is what a QuickBooks press records.
-  The page totals every submitted cardholder's charges by their final category (an edit wins over the statement default), lists every category and the grand total, and shows who has and has not submitted.
-  Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`.
+  One row per employee: name, total charges on the statement, and submitted or not submitted.
+  Under that, the Amex statement total, then a category grid: Travel, Fuel, Meals, Supplies, Parts & Materials, Software, Office Supplies, and any other category present on a charge. Each amount starts as the sum of submitted charges in that category (an employee edit wins over the statement category) and can be typed over. The running sum updates as you type. A red warning shows when that sum does not match the Amex statement total. **Save** (`POST /admin/summary/<stmt>/categories`) keeps the edited amounts for that statement only.
+  Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`. Those files use the grid amounts.
   The month folder name is `American Express charges <Month> <YYYY>` (for example `American Express charges October 2026`).
-  **Submit to QuickBooks for Pay** is on this page only. It stays disabled until every cardholder has submitted and the summary total equals the statement total; otherwise the page shows a red warning with the difference.
-  Pressing it locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`.
+  **Submit to QuickBooks for Pay** is on this page only. It stays disabled until every cardholder has submitted and the grid sum equals the Amex statement total; otherwise the page shows a red warning with the difference.
+  Pressing it sends the grid amounts (not a fresh sum of the charges), locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`.
   The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`).
   The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`.
   Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.
   Littledude creates the bill and files the attachments. This server stores no QuickBooks or Dropbox credentials and does not call either service.
-  After the month is locked, flag, category, comment, submit, and admin reset return 409.
+  After the month is locked, flag, category, comment, submit, grid edits, and admin reset return 409.
 * The email builder (`tools/make_email.py`) puts only "Open my charges" links in the email, never flag/submit links,
   because Outlook Safe Links and scanners auto-open links and would create fake flags.
 
@@ -39,7 +40,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 | Path | Purpose |
 |---|---|
 | `app.py` | Flask app (page, flag, submit, email, log, admin, monthly summary) |
-| `summary.py` | Category totals, PDF, and spreadsheet. No outside service calls |
+| `summary.py` | Category grid, PDF, and spreadsheet. No outside service calls |
 | `requirements.txt` | Flask, gunicorn, tzdata |
 | `render.yaml` | Blueprint: Starter web service + 1 GB disk at /var/data + env vars |
 | `tools/seed_sep22.py` | Builds `statements/2026-09-22.json` from the approved v5 chart (73 charges, $17,024.09) |

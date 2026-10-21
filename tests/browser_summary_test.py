@@ -85,12 +85,15 @@ with sync_playwright() as p:
     pg = desktop.new_page()
     pg.goto(BASE + f'/admin/summary/{AUG}')
     assert pg.locator('#summary-warning').inner_text() == (
-        'Summary total $0.00 does not equal the statement total $17.50. '
+        'Category total $0.00 does not match the Amex statement total $17.50. '
         'Difference: $17.50. Not everyone has submitted.')
+    assert pg.locator('#amex-total').inner_text() == 'Amex statement total $17.50'
     assert pg.locator('#qb-submit').is_disabled()
     assert pg.locator('#qb-submit').inner_text() == 'Submit to QuickBooks for Pay'
     assert 'Not submitted' in pg.locator('body').inner_text()
     assert 'Merchandise & Supplies' in pg.locator('body').inner_text()
+    assert pg.locator('input[data-category="Fuel"]').input_value() == '$0.00'
+    assert pg.locator('input[data-category="Parts & Materials"]').input_value() == '$0.00'
     assert pg.locator('#sent').count() == 0
     with pg.expect_download() as download_info:
         pg.get_by_role('link', name='Download PDF').click()
@@ -108,6 +111,8 @@ with sync_playwright() as p:
     phone.goto(BASE + f'/admin/summary/{AUG}')
     assert phone.locator('#qb-submit').is_disabled()
     assert 'Difference: $17.50.' in phone.locator('#summary-warning').inner_text()
+    assert phone.locator('#amex-total').inner_text() == 'Amex statement total $17.50'
+    assert phone.locator('input[data-category="Meals"]').is_visible()
     assert 'Signed in as Meghan' in phone.locator('body').inner_text()
     phone.screenshot(path=str(shots / 'summary-waiting-mobile.png'), full_page=True)
 
@@ -116,13 +121,26 @@ with sync_playwright() as p:
     pg.reload()
     assert pg.locator('#qb-submit').is_disabled()
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
-    assert 'Not submitted' in pg.locator('tr').nth(2).inner_text()
+    assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
+    assert pg.locator('input[data-category="Entertainment"]').input_value() == '$5.00'
+    assert pg.locator('#running-sum').inner_text() == '$14.00'
+    pg.screenshot(path=str(shots / 'summary-category-grid.png'), full_page=True)
     post(f'/v/{ben}/submit')
     pg.reload()
     assert pg.locator('#summary-warning').count() == 0
     assert pg.locator('#qb-submit').is_enabled()
-    assert 'Grand total' in pg.locator('body').inner_text()
-    assert '$17.50' in pg.locator('body').inner_text()
+    assert pg.locator('#running-sum').inner_text() == '$17.50'
+    assert '$17.50' in pg.locator('#amex-total').inner_text()
+    fuel = pg.locator('input[data-category="Fuel"]')
+    fuel.fill('1.00')
+    assert pg.locator('#running-sum').inner_text() == '$18.50'
+    assert 'Category total $18.50 does not match the Amex statement total $17.50.' in pg.locator('#summary-warning').inner_text()
+    assert 'Difference: -$1.00.' in pg.locator('#summary-warning').inner_text()
+    assert pg.locator('#qb-submit').is_disabled()
+    fuel.fill('$0.00')
+    fuel.blur()
+    assert pg.locator('#summary-warning').count() == 0
+    assert pg.locator('#qb-submit').is_enabled()
     pg.locator('#qb-submit').click()
     pg.locator('#sent').wait_for()
     assert pg.locator('#sent').inner_text() == 'Sent for posting'

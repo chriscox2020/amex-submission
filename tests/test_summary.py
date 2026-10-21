@@ -94,14 +94,15 @@ class SummaryTest(unittest.TestCase):
         out.mkdir(parents=True, exist_ok=True)
         for f in out.glob('*'):
             f.unlink()
-        summaries = pathlib.Path(app.DATA_DIR, 'summaries')
-        if summaries.exists():
-            for p in sorted(summaries.rglob('*'), reverse=True):
-                if p.is_file():
-                    p.unlink()
-                else:
-                    p.rmdir()
-            summaries.rmdir()
+        for folder_name in ('summaries', 'summary-grids'):
+            folder = pathlib.Path(app.DATA_DIR, folder_name)
+            if folder.exists():
+                for p in sorted(folder.rglob('*'), reverse=True):
+                    if p.is_file():
+                        p.unlink()
+                    else:
+                        p.rmdir()
+                folder.rmdir()
 
     def tearDown(self):
         app.now = self._now
@@ -112,6 +113,20 @@ class SummaryTest(unittest.TestCase):
 
     def auth_post(self, path, user='Chris', password='local-admin'):
         return self.client.post(path, auth=(user, password))
+
+    def grid_data(self, amounts):
+        cats, amts = [], []
+        for name, dollars in amounts:
+            cats.append(name)
+            amts.append(dollars if isinstance(dollars, str) else f'{dollars:.2f}')
+        return {'cat': cats, 'amt': amts}
+
+    def post_grid(self, amounts, stmt=AUG, user='Chris', path_suffix='categories'):
+        return self.client.post(
+            f'/admin/summary/{stmt}/{path_suffix}',
+            data=self.grid_data(amounts),
+            auth=(user, 'local-admin'),
+        )
 
     def page(self, stmt=AUG, user='Chris'):
         return self.auth_get(f'/admin/summary/{stmt}', user=user).get_data(as_text=True)
@@ -165,6 +180,9 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn("id='qb-submit'", employee)
         ada_page = self.client.get(f'/v/{self.ada}').get_data(as_text=True)
         self.assertNotIn('Submit to QuickBooks for Pay', ada_page)
+        self.assertNotIn('category-grid', ada_page)
+        self.assertNotIn('save-categories', ada_page)
+        self.assertNotIn("id='amex-total'", ada_page)
         self.assertIn(">Submit</button>", ada_page)
 
         self.submit_employee(self.ada, 'Entertainment', 2)
@@ -190,10 +208,17 @@ class SummaryTest(unittest.TestCase):
         self.assertIn('Submit to QuickBooks for Pay', waiting)
         self.assertIn("id='summary-warning'", waiting)
         self.assertIn("class='warn'", waiting)
-        self.assertIn('Summary total $0.00 does not equal the statement total $17.50. Difference: $17.50.', waiting)
+        self.assertIn('Category total $0.00 does not match the Amex statement total $17.50. Difference: $17.50.', waiting)
         self.assertIn('Not everyone has submitted.', waiting)
-        for name in summary.AMEX_CATEGORIES:
-            self.assertIn(html.escape(name), waiting)
+        self.assertLess(waiting.index("id='cardholders'"), waiting.index("id='amex-total'"))
+        self.assertLess(waiting.index("id='amex-total'"), waiting.index("data-category='Travel'"))
+        self.assertIn('>Ada</td><td><b style=\'color:#c62828\'>Not submitted</b></td><td class=\'n\'>$14.00</td>', waiting)
+        self.assertIn('>Ben</td><td><b style=\'color:#c62828\'>Not submitted</b></td><td class=\'n\'>$3.50</td>', waiting)
+        for name in summary.ACCOUNTING_CATEGORIES:
+            self.assertIn(f"data-category='{html.escape(name)}'", waiting)
+        self.assertIn('Restaurant', waiting)
+        self.assertIn('Merchandise &amp; Supplies', waiting)
+        self.assertNotIn('Communications', waiting)
         blocked = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
         self.assertEqual(blocked.status_code, 409)
         self.assertEqual(blocked.get_json()['error'], 'not ready')
@@ -206,7 +231,7 @@ class SummaryTest(unittest.TestCase):
         self.assertIn('>Ben</td><td><b style=\'color:#c62828\'>Not submitted</b>', partial)
         self.assertIn('Entertainment', partial)
         self.assertIn('$5.00', partial)
-        self.assertIn('Summary total $14.00 does not equal the statement total $17.50. Difference: $3.50.', partial)
+        self.assertIn('Category total $14.00 does not match the Amex statement total $17.50. Difference: $3.50.', partial)
         self.assertIn("id='qb-submit' disabled", partial)
         built = summary.build_summary(app.load_statements()[AUG], app.state)
         totals = dict(built['categories'])
@@ -300,7 +325,10 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(block['grand_total'], 17.5)
         self.assertEqual(block['statement_total'], 17.5)
         self.assertEqual(block['categories']['Entertainment'], 5.0)
-        self.assertEqual(block['categories']['Communications'], 0.0)
+        self.assertEqual(block['categories']['Fuel'], 0.0)
+        self.assertNotIn('Communications', block['categories'])
+        for name in summary.ACCOUNTING_CATEGORIES:
+            self.assertIn(name, block['categories'])
         ada = json.loads(files['ada-submission.json'])
         air = next(c for c in ada['charges'] if c['merchant'] == 'AIR')
         self.assertEqual(air['original_category'], 'Travel')
@@ -435,6 +463,7 @@ class SummaryTest(unittest.TestCase):
             ('get', f'/admin/summary/{AUG}/summary.csv'),
             ('get', f'/admin/summary/{AUG}/summary.xlsx'),
             ('post', f'/admin/summary/{AUG}/qb-submit'),
+            ('post', f'/admin/summary/{AUG}/categories'),
             ('post', '/admin/upload'),
             ('post', f'/admin/reset/{AUG}/ben'),
         ]
@@ -468,6 +497,177 @@ class SummaryTest(unittest.TestCase):
         log_body = opened.get_data(as_text=True)
         self.assertIn(ada_note, log_body)
         self.assertIn(ben_note, log_body)
+
+    def test_grid_prefill_order_and_money_parse(self):
+        self.assertEqual(summary.parse_money_cents('$1,234.50'), 123450)
+        self.assertEqual(summary.parse_money_cents('-$1.00'), -100)
+        self.assertEqual(summary.parse_money_cents('0'), 0)
+        with self.assertRaises(ValueError):
+            summary.parse_money_cents('12.345')
+        self.assertEqual(summary.grid_category_name(' fuel '), 'Fuel')
+        self.assertEqual(summary.grid_category_name('travel'), 'Travel')
+        people = [{
+            'submitted': True,
+            'charges': [
+                {'original_category': 'Restaurant', 'final_category': 'Meals', 'amount_cents': 1000},
+                {'original_category': 'Fuel', 'final_category': 'Fuel', 'amount_cents': 250},
+                {'original_category': 'Parking', 'final_category': 'Parking', 'amount_cents': 75},
+            ],
+        }]
+        rows, total = summary.category_grid(people, None)
+        names = [name for name, _cents in rows]
+        self.assertEqual(names[:len(summary.ACCOUNTING_CATEGORIES)], list(summary.ACCOUNTING_CATEGORIES))
+        self.assertEqual(names[len(summary.ACCOUNTING_CATEGORIES):], ['Parking', 'Restaurant'])
+        amounts = dict(rows)
+        self.assertEqual(amounts['Meals'], 1000)
+        self.assertEqual(amounts['Fuel'], 250)
+        self.assertEqual(amounts['Travel'], 0)
+        self.assertEqual(amounts['Parking'], 75)
+        self.assertEqual(amounts['Restaurant'], 0)
+        self.assertEqual(total, 1325)
+        edited, edited_total = summary.category_grid(people, {'fuel': 500, 'Software': 10})
+        self.assertEqual(dict(edited)['Fuel'], 500)
+        self.assertEqual(dict(edited)['Software'], 10)
+        self.assertEqual(edited_total, 1000 + 500 + 75 + 10)
+
+    def test_saved_grid_persists_per_statement(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        built = summary.build_summary(app.load_statements()[AUG], app.state)
+        amounts = [(name, cents / 100) for name, cents in built['categories']]
+        amounts = [(name, 4.25 if name == 'Meals' else dollars) for name, dollars in amounts]
+        saved = self.post_grid(amounts, user='Meghan')
+        self.assertEqual(saved.status_code, 303)
+        page = self.page()
+        self.assertIn("data-category='Meals' value='$4.25'", page)
+        self.assertIn("id='grid-saved'>Saved Oct 21, 2026 9:30 AM CT by Meghan.", page)
+        self.assertIn('Category total $21.75 does not match the Amex statement total $17.50.', page)
+        self.assertIn("id='qb-submit' disabled", page)
+        again = self.page(user='Chris')
+        self.assertIn("data-category='Meals' value='$4.25'", again)
+        grid_file = pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json')
+        stored = json.loads(grid_file.read_text())
+        self.assertEqual(stored['by'], 'Meghan')
+        self.assertEqual(stored['amounts']['Meals'], 425)
+        self.assertEqual(stored['stmt'], AUG)
+        other = self.page(JUL)
+        self.assertIn("data-category='Meals' value='$0.00'", other)
+        self.assertFalse(pathlib.Path(app.DATA_DIR, 'summary-grids', JUL + '.json').exists())
+        self.assertNotIn('$4.25', other)
+        logs = [r for r in app.read_log() if r['type'] == 'summary_grid']
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['by'], 'Meghan')
+        self.assertEqual(logs[0]['stmt'], AUG)
+        repeat = self.post_grid(amounts, user='Meghan')
+        self.assertEqual(repeat.status_code, 303)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'summary_grid']), 1)
+
+    def test_qb_submit_uses_grid_values(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        built = summary.build_summary(app.load_statements()[AUG], app.state)
+        amounts = []
+        for name, _cents in built['categories']:
+            if name == 'Travel':
+                amounts.append((name, 10))
+            elif name == 'Fuel':
+                amounts.append((name, 7.5))
+            else:
+                amounts.append((name, 0))
+        self.assertEqual(self.post_grid(amounts).status_code, 303)
+        edited = self.page()
+        self.assertIn("data-category='Travel' value='$10.00'", edited)
+        self.assertIn("data-category='Fuel' value='$7.50'", edited)
+        self.assertIn("data-category='Entertainment' value='$0.00'", edited)
+        self.assertNotIn("id='summary-warning'", edited)
+        self.assertIn("id='qb-submit'>Submit to QuickBooks for Pay", edited)
+        blocked = self.client.post(
+            f'/admin/summary/{AUG}/qb-submit',
+            data=self.grid_data([('Not A Real Category', '1.00')]),
+            auth=('Chris', 'local-admin'),
+        )
+        self.assertEqual(blocked.status_code, 400)
+        bad_amount = self.client.post(
+            f'/admin/summary/{AUG}/categories',
+            data={'cat': 'Fuel', 'amt': 'nope'},
+            auth=('Chris', 'local-admin'),
+        )
+        self.assertEqual(bad_amount.status_code, 400)
+        sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(sent.status_code, 303)
+        rec = next(r for r in app.read_log() if r['type'] == 'qb_submit')
+        self.assertEqual(rec['categories']['Travel'], 10.0)
+        self.assertEqual(rec['categories']['Fuel'], 7.5)
+        self.assertEqual(rec['categories']['Entertainment'], 0.0)
+        self.assertEqual(rec['categories']['Restaurant'], 0.0)
+        self.assertEqual(rec['summary_total'], 17.5)
+        self.assertEqual(rec['statement_total'], 17.5)
+        msg = self.qb_messages()[0]
+        text = ''
+        files = {}
+        for part in msg.walk():
+            name = part.get_filename()
+            if name:
+                files[name] = part.get_payload(decode=True)
+            elif part.get_content_type() == 'text/plain':
+                text = part.get_payload(decode=True).decode()
+        block = json.loads(text[text.index('{'):text.rindex('}') + 1])
+        self.assertEqual(block['categories']['Travel'], 10.0)
+        self.assertEqual(block['categories']['Fuel'], 7.5)
+        self.assertEqual(block['categories']['Entertainment'], 0.0)
+        self.assertEqual(block['grand_total'], 17.5)
+        self.assertEqual(block['statement_total'], 17.5)
+        pdf_name = 'American Express charges August 2026 - Summary.pdf'
+        self.assertIn(b'Travel: $10.00', files[pdf_name])
+        self.assertIn(b'Fuel: $7.50', files[pdf_name])
+        self.assertIn(b'Entertainment: $0.00', files[pdf_name])
+        ada = json.loads(files['ada-submission.json'])
+        air = next(c for c in ada['charges'] if c['merchant'] == 'AIR')
+        self.assertEqual(air['final_category'], 'Entertainment')
+        self.assertEqual(air['original_category'], 'Travel')
+        locked = self.post_grid(amounts)
+        self.assertEqual(locked.status_code, 409)
+        self.assertIn('sent for posting', locked.get_data(as_text=True).lower())
+
+    def test_mismatch_blocks_submit_until_grid_matches(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        built = summary.build_summary(app.load_statements()[AUG], app.state)
+        amounts = [(name, 100 if name == 'Travel' else 0) for name, _cents in built['categories']]
+        self.assertEqual(self.post_grid(amounts).status_code, 303)
+        page = self.page()
+        self.assertIn('Category total $100.00 does not match the Amex statement total $17.50. '
+                      'Difference: -$82.50.', page)
+        self.assertIn("id='qb-submit' disabled", page)
+        refused = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.get_json()['error'], 'not ready')
+        self.assertEqual(refused.get_json()['difference'], -82.5)
+        self.assertEqual(self.qb_messages(), [])
+        fixed = [(name, 17.5 if name == 'Office Supplies' else 0) for name, _cents in built['categories']]
+        self.assertEqual(self.post_grid(fixed, user='Meghan').status_code, 303)
+        ready = self.page(user='meghan')
+        self.assertNotIn("id='summary-warning'", ready)
+        self.assertIn("data-category='Office Supplies' value='$17.50'", ready)
+        sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit', user='Meghan')
+        self.assertEqual(sent.status_code, 303)
+        rec = next(r for r in app.read_log() if r['type'] == 'qb_submit')
+        self.assertEqual(rec['by'], 'Meghan')
+        self.assertEqual(rec['categories']['Office Supplies'], 17.5)
+        self.assertEqual(rec['categories']['Entertainment'], 0.0)
+
+    def test_matching_grid_still_waits_for_every_employee(self):
+        self.submit_employee(self.ada)
+        built = summary.build_summary(app.load_statements()[AUG], app.state)
+        amounts = [(name, 17.5 if name == 'Supplies' else 0) for name, _cents in built['categories']]
+        self.assertEqual(self.post_grid(amounts).status_code, 303)
+        page = self.page()
+        self.assertIn("<p class='warn' id='summary-warning'>Not everyone has submitted.</p>", page)
+        self.assertIn("id='qb-submit' disabled", page)
+        refused = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.get_json()['difference'], 0)
+        self.assertEqual(self.qb_messages(), [])
 
     def test_no_service_credentials(self):
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()

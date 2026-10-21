@@ -9,7 +9,8 @@ One page per employee per statement, reached by an unguessable token link.
            Each flagged line is charge date, merchant, amount, flagged date,
            reference (or "ref pending"), then the note.
 Charge review stays in this app. An employee's Submit writes the log and the record email only.
-Chris and Meghan have a separate summary page. Sending that summary emails Littledude.
+Chris and Meghan have a separate summary page. It lists each employee and a category
+grid they can edit by hand. Sending that grid emails Littledude.
 This server does not call QuickBooks or Dropbox.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
@@ -875,53 +876,279 @@ def summary_folder(label):
     segment = str(label or 'unknown').replace('/', '-').replace('\\', '-').strip() or 'unknown'
     return os.path.join(DATA_DIR, 'summaries', segment)
 
+def grid_path(stmt):
+    """One file per statement under /var/data/summary-grids. The name cannot escape that directory."""
+    name = os.path.basename(str(stmt or ''))
+    if not name or name != stmt or name in ('.', '..'):
+        return None
+    return os.path.join(DATA_DIR, 'summary-grids', name + '.json')
+
+def read_grid_doc(stmt):
+    path = grid_path(stmt)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get('amounts'), dict):
+        return None
+    return doc
+
+def read_grid(stmt):
+    """Saved grid amounts in cents, or None when this statement has no saved edit."""
+    doc = read_grid_doc(stmt)
+    if not doc:
+        return None
+    out = {}
+    for name, cents in doc['amounts'].items():
+        try:
+            out[str(name)] = int(cents)
+        except (TypeError, ValueError):
+            return None
+    return out
+
+def write_grid(stmt, amounts, actor):
+    path = grid_path(stmt)
+    if not path:
+        abort(400)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        'stmt': stmt,
+        'by': actor,
+        'ts': now(),
+        'amounts': {str(name): int(cents) for name, cents in amounts.items()},
+    }
+    raw = json.dumps(payload, indent=1) + '\n'
+    with LOCK:
+        with open(path, 'w') as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+    return payload
+
+def built_summary(doc, saved=None):
+    if saved is None:
+        saved = read_grid(doc['stmt'])
+    return summary.build_summary(doc, state, saved=saved)
+
+def grid_warning(built):
+    """Red warning when the grid sum is not the Amex total, or someone has not submitted."""
+    if built['ready']:
+        return ''
+    parts = []
+    if built['difference_cents'] != 0:
+        parts.append(
+            f"Category total {summary.format_money(built['grid_cents'])} does not match the "
+            f"Amex statement total {summary.format_money(built['statement_cents'])}. "
+            f"Difference: {summary.format_money(built['difference_cents'])}."
+        )
+    if not built['everyone_submitted']:
+        parts.append('Not everyone has submitted.')
+    return ' '.join(parts)
+
+def posted_grid_amounts():
+    """Form fields cat/amt, or None when the request did not include a grid."""
+    cats = request.form.getlist('cat')
+    amts = request.form.getlist('amt')
+    if not cats and not amts:
+        return None
+    if len(cats) != len(amts):
+        abort(400)
+    out = {}
+    for name, raw in zip(cats, amts):
+        canon = summary.grid_category_name(name)
+        try:
+            out[canon] = summary.parse_money_cents(raw)
+        except ValueError:
+            abort(400)
+    return out
+
+def apply_posted(doc, posted):
+    """Current grid (saved edits over the prefill), with this request's amounts on top."""
+    base = summary.build_summary(doc, state, saved=read_grid(doc['stmt']))
+    if posted is None:
+        return base
+    allowed = {name for name, _cents in base['categories']}
+    if any(name not in allowed for name in posted):
+        abort(400)
+    merged = {name: cents for name, cents in base['categories']}
+    merged.update(posted)
+    return summary.build_summary(doc, state, saved=merged)
+
+GRID_SCRIPT = r"""
+function centsOf(raw) {
+  var text = String(raw == null ? '' : raw).replace(/[$,\s]/g, '');
+  if (!/^-?\d+(\.\d{1,2})?$/.test(text)) return null;
+  var sign = text.charAt(0) === '-' ? -1 : 1;
+  var body = sign < 0 ? text.slice(1) : text;
+  var whole, frac;
+  if (body.indexOf('.') >= 0) {
+    var bits = body.split('.');
+    whole = bits[0];
+    frac = (bits[1] + '00').slice(0, 2);
+  } else {
+    whole = body;
+    frac = '00';
+  }
+  return sign * (parseInt(whole, 10) * 100 + parseInt(frac, 10));
+}
+function money(cents) {
+  var sign = cents < 0 ? '-' : '';
+  cents = Math.abs(cents);
+  var dollars = Math.floor(cents / 100);
+  var frac = cents % 100;
+  return sign + '$' + dollars.toLocaleString('en-US') + '.' + (frac < 10 ? '0' : '') + frac;
+}
+function refresh() {
+  var form = document.getElementById('category-grid');
+  if (!form) return;
+  var inputs = form.querySelectorAll('input.amt');
+  var sum = 0, bad = false;
+  for (var i = 0; i < inputs.length; i++) {
+    var c = centsOf(inputs[i].value);
+    if (c === null) bad = true;
+    else sum += c;
+  }
+  var running = document.getElementById('running-sum');
+  if (running) running.textContent = bad ? '\u2014' : money(sum);
+  var stmt = parseInt(document.getElementById('amex-total').getAttribute('data-cents'), 10);
+  var everyone = form.getAttribute('data-everyone') === '1';
+  var btn = document.getElementById('qb-submit');
+  var text = '';
+  if (bad || sum !== stmt) {
+    text = 'Category total ' + (bad ? '\u2014' : money(sum)) +
+      ' does not match the Amex statement total ' + money(stmt) +
+      '. Difference: ' + (bad ? '\u2014' : money(stmt - sum)) + '.';
+    if (!everyone) text += ' Not everyone has submitted.';
+  } else if (!everyone) {
+    text = 'Not everyone has submitted.';
+  }
+  var box = document.getElementById('grid-note');
+  var warn = document.getElementById('summary-warning');
+  if (!text) {
+    if (warn && warn.parentNode) warn.parentNode.removeChild(warn);
+  } else if (warn) {
+    warn.textContent = text;
+  } else if (box) {
+    warn = document.createElement('p');
+    warn.id = 'summary-warning';
+    warn.className = 'warn';
+    warn.textContent = text;
+    box.insertBefore(warn, box.firstChild);
+  }
+  if (btn) btn.disabled = !!(bad || sum !== stmt || !everyone);
+}
+function saveGrid() {
+  var form = document.getElementById('category-grid');
+  if (!form) return;
+  var inputs = form.querySelectorAll('input.amt');
+  for (var i = 0; i < inputs.length; i++) {
+    if (centsOf(inputs[i].value) === null) return;
+  }
+  var body = new URLSearchParams(new FormData(form));
+  fetch(form.action, {
+    method: 'POST',
+    headers: {'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString(),
+    credentials: 'same-origin'
+  }).then(function(r) {
+    var note = document.getElementById('grid-saved');
+    if (r.ok && note) note.textContent = 'Saved.';
+  });
+}
+var gridInputs = document.querySelectorAll('#category-grid input.amt');
+for (var i = 0; i < gridInputs.length; i++) {
+  gridInputs[i].addEventListener('input', refresh);
+  gridInputs[i].addEventListener('change', saveGrid);
+}
+refresh();
+"""
+
 def render_summary_page(built, actor, qb):
     esc = html.escape
     period = built['period']
     stmt = built['stmt']
     parts = ["<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
              f"<title>{esc(period['month_label'])} American Express summary</title>",
-             "<style>body{font-family:Arial,Helvetica,sans-serif;margin:0;color:#222}h1{font-size:28px;margin:16px 18px 8px}",
-             ".sheet{margin:0 18px 40px}table{border-collapse:collapse;width:100%;max-width:760px;margin:12px 0}",
-             "td,th{border:1px solid #999;padding:8px 10px;text-align:left}th{background:#e8e8e8}.n{text-align:right}",
-             ".warn{color:#c62828;font-weight:bold}.sent{color:#2e7d32;font-weight:bold;font-size:20px}",
+             "<style>body{font-family:Arial,Helvetica,sans-serif;margin:0;color:#222;background:#f4f6f8}",
+             ".top{background:#0b6aa2;color:#fff;padding:16px 18px}.top h1{margin:0;font-size:26px;font-weight:600}",
+             ".sheet{margin:0 auto;max-width:820px;padding:8px 18px 48px}",
+             "table{border-collapse:collapse;width:100%;max-width:760px;margin:12px 0;background:#fff}",
+             "td,th{border:1px solid #c5cdd4;padding:8px 10px;text-align:left}th{background:#e8eef3}",
+             ".n{text-align:right;font-variant-numeric:tabular-nums}",
+             ".warn{color:#c62828;font-weight:bold;background:#fdecea;border:1px solid #e57373;padding:12px 14px;max-width:732px}",
+             ".sent{color:#2e7d32;font-weight:bold;font-size:20px}",
+             ".amex-total{font-size:22px;margin:8px 0 4px}",
+             "input.amt{width:8.5em;font:16px Arial,Helvetica,sans-serif;text-align:right;padding:6px 8px;border:1px solid #8aa;border-radius:4px}",
+             "#running-sum{font-weight:bold;font-size:18px}",
+             ".save{margin:16px 12px 0 0;font-size:16px;padding:10px 16px;background:#0b6aa2;color:#fff;border:0;border-radius:6px;cursor:pointer}",
              ".qb{margin-top:16px;font-size:18px;padding:12px 18px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}",
-             ".qb:disabled{background:#9aa;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}</style></head><body>",
-             f"<h1>{esc(period['month_label'])} American Express</h1><div class='sheet'>",
+             ".qb:disabled{background:#9aa;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}",
+             ".hint{color:#555;font-size:14px;max-width:760px}</style></head><body>",
+             f"<div class='top'><h1>{esc(period['month_label'])} American Express</h1></div><div class='sheet'>",
              f"<p>Signed in as {esc(actor)}. Statement close date: {esc(period['close_date'])}.</p>",
              f"<p>Month folder: {esc(period['folder_label'])}.</p>",
-             "<h2>Cardholders</h2><table><tr><th>Employee</th><th>Status</th><th>Total</th></tr>"]
+             "<h2>Cardholders</h2><table id='cardholders'><tr><th>Employee</th><th>Status</th><th>Total charges</th></tr>"]
     for person in built['people']:
         if person['submitted']:
             status = 'Submitted ' + esc(nice(person['ts'])) if person['ts'] else 'Submitted'
         else:
             status = "<b style='color:#c62828'>Not submitted</b>"
-        parts.append(f"<tr><td>{esc(person['name'])}</td><td>{status}</td><td class='n'>{summary.format_money(person['total_cents'])}</td></tr>")
-    parts.append("</table><h2>Categories</h2><table><tr><th>Category</th><th>Amount</th></tr>")
-    for name, cents in built['categories']:
-        parts.append(f"<tr><td>{esc(name)}</td><td class='n'>{summary.format_money(cents)}</td></tr>")
-    parts.append(f"<tr><td><b>Grand total</b></td><td class='n'><b>{summary.format_money(built['summary_cents'])}</b></td></tr></table>")
-    parts.append(f"<p>Statement total: {summary.format_money(built['statement_cents'])}.</p>")
+        parts.append(f"<tr><td>{esc(person['name'])}</td><td>{status}</td>"
+                     f"<td class='n'>{summary.format_money(person['total_cents'])}</td></tr>")
+    parts.append("</table><h2>Categories</h2>")
+    parts.append("<p class='hint'>Amounts start from submitted charges. Edit any row by hand. "
+                 "Save keeps the amounts for this statement. Submit sends these amounts.</p>")
+    if qb:
+        when = esc(nice(qb['ts'])) if qb.get('ts') else ''
+        parts.append(f"<p class='amex-total' id='amex-total' data-cents='{built['statement_cents']}'>"
+                     f"<b>Amex statement total</b> {summary.format_money(built['statement_cents'])}</p>")
+        parts.append("<table id='category-grid'><tr><th>Category</th><th>Amount</th></tr>")
+        for name, cents in built['categories']:
+            parts.append(f"<tr><td>{esc(name)}</td><td class='n'>{summary.format_money(cents)}</td></tr>")
+        parts.append(f"<tr><td><b>Running sum</b></td><td class='n' id='running-sum'>"
+                     f"{summary.format_money(built['grid_cents'])}</td></tr></table>")
+        parts.append(f"<p class='sent' id='sent'>Sent for posting</p><p id='sent-when'>{when} by {esc(qb.get('by') or '')}.</p>")
+    else:
+        everyone = '1' if built['everyone_submitted'] else '0'
+        disabled = '' if built['ready'] else ' disabled'
+        parts.append(f"<form id='category-grid' data-everyone='{everyone}' method='post' "
+                     f"action='/admin/summary/{esc(stmt)}/categories' autocomplete='off'>")
+        parts.append(f"<p class='amex-total' id='amex-total' data-cents='{built['statement_cents']}'>"
+                     f"<b>Amex statement total</b> {summary.format_money(built['statement_cents'])}</p>")
+        parts.append("<table><tr><th>Category</th><th>Amount</th></tr>")
+        for name, cents in built['categories']:
+            shown = summary.format_money(cents)
+            parts.append(f"<tr><td>{esc(name)}</td><td class='n'>"
+                         f"<input type='hidden' name='cat' value='{esc(name)}'>"
+                         f"<input class='amt' name='amt' data-category='{esc(name)}' value='{esc(shown)}' "
+                         f"inputmode='decimal' autocomplete='off'></td></tr>")
+        parts.append(f"<tr><td><b>Running sum</b></td><td class='n' id='running-sum'>"
+                     f"{summary.format_money(built['grid_cents'])}</td></tr></table>")
+        parts.append("<div id='grid-note'>")
+        warn = grid_warning(built)
+        if warn:
+            parts.append(f"<p class='warn' id='summary-warning'>{esc(warn)}</p>")
+        parts.append("</div>")
+        saved = read_grid_doc(stmt)
+        if saved and saved.get('ts'):
+            try:
+                when = nice(saved['ts'])
+            except Exception:
+                when = ''
+            if when:
+                parts.append(f"<p id='grid-saved'>Saved {esc(when)} by {esc(saved.get('by') or '')}.</p>")
+        parts.append("<button class='save' type='submit' id='save-categories'>Save</button>")
+        parts.append(f"<button class='qb' type='submit' formaction='/admin/summary/{esc(stmt)}/qb-submit' "
+                     f"id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button></form>")
+        parts.append(f"<script>{GRID_SCRIPT}</script>")
     parts.append(f"<p><a class='dl' href='/admin/summary/{esc(stmt)}/summary.pdf'>Download PDF</a>"
                  f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.csv'>Download CSV</a>"
                  f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.xlsx'>Download XLSX</a></p>")
-    if qb:
-        when = esc(nice(qb['ts'])) if qb.get('ts') else ''
-        parts.append(f"<p class='sent' id='sent'>Sent for posting</p><p id='sent-when'>{when} by {esc(qb.get('by') or '')}.</p>")
-    else:
-        if not built['ready']:
-            parts.append("<p class='warn' id='summary-warning'>Summary total "
-                         f"{summary.format_money(built['summary_cents'])} does not equal the statement total "
-                         f"{summary.format_money(built['statement_cents'])}. "
-                         f"Difference: {summary.format_money(built['difference_cents'])}."
-                         + ("" if built['everyone_submitted'] else " Not everyone has submitted.")
-                         + "</p>")
-            disabled = ' disabled'
-        else:
-            disabled = ''
-        parts.append(f"<form method='post' action='/admin/summary/{esc(stmt)}/qb-submit'>"
-                     f"<button class='qb' type='submit' id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button></form>")
-    parts.append("<p style='color:#555;font-size:14px'>Littledude creates the bill and files the attachments. This server does not.</p></div></body></html>")
+    parts.append("<p class='hint'>Littledude creates the bill and files the attachments. This server does not.</p>"
+                 "</div></body></html>")
     return ''.join(parts)
 
 def write_summary_files(built):
@@ -973,7 +1200,7 @@ def summary_index():
     esc = html.escape
     rows = []
     for stmt, doc in sorted(load_statements().items(), reverse=True):
-        built = summary.build_summary(doc, state)
+        built = built_summary(doc)
         qb = qb_record(stmt)
         status = 'Sent for posting' if qb else ('Ready' if built['ready'] else 'Waiting')
         rows.append(f"<tr><td><a href='/admin/summary/{esc(stmt)}'>{esc(stmt)}</a></td>"
@@ -988,7 +1215,7 @@ def summary_page(stmt):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    built = summary.build_summary(doc, state)
+    built = built_summary(doc)
     return Response(render_summary_page(built, actor, qb_record(stmt)), headers={'Cache-Control': 'no-store'})
 
 def _summary_download(stmt, kind):
@@ -996,7 +1223,7 @@ def _summary_download(stmt, kind):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    built = summary.build_summary(doc, state)
+    built = built_summary(doc)
     if kind == 'pdf':
         data, mime, ext = summary.build_pdf(built), 'application/pdf', 'pdf'
     elif kind == 'csv':
@@ -1019,18 +1246,49 @@ def summary_csv(stmt):
 def summary_xlsx(stmt):
     return _summary_download(stmt, 'xlsx')
 
+@app.post('/admin/summary/<stmt>/categories')
+def summary_save_categories(stmt):
+    """Store the hand-entered category amounts for this statement."""
+    actor = summary_actor()
+    doc = load_statements().get(stmt)
+    if not doc:
+        abort(404)
+    posted = posted_grid_amounts()
+    if posted is None:
+        abort(400)
+    with SUBMIT_LOCK:
+        if qb_record(stmt):
+            if 'application/json' in request.headers.get('Accept', ''):
+                return jsonify(error='month locked'), 409
+            return Response('This month was sent for posting', 409)
+        built = apply_posted(doc, posted)
+        amounts = {name: cents for name, cents in built['categories']}
+        previous = read_grid(stmt)
+        write_grid(stmt, amounts, actor)
+        if previous != amounts:
+            payload = summary.category_payload(built)
+            append({'type': 'summary_grid', 'stmt': stmt, 'by': actor, **meta(),
+                    'categories': payload['categories'], 'grid_total': payload['grand_total']})
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(ok=True, grid_total=round(built['grid_cents'] / 100, 2),
+                       statement_total=round(built['statement_cents'] / 100, 2),
+                       difference=round(built['difference_cents'] / 100, 2))
+    return redirect(f'/admin/summary/{stmt}', 303)
+
 @app.post('/admin/summary/<stmt>/qb-submit')
 def summary_qb_submit(stmt):
     actor = summary_actor()
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
+    posted = posted_grid_amounts()
     with SUBMIT_LOCK:
         if qb_record(stmt):
             return redirect(f'/admin/summary/{stmt}', 303)
-        built = summary.build_summary(doc, state)
+        built = apply_posted(doc, posted)
         if not built['ready']:
             return jsonify(error='not ready', difference=round(built['difference_cents'] / 100, 2)), 409
+        write_grid(stmt, {name: cents for name, cents in built['categories']}, actor)
         folder, _records = write_summary_files(built)
         try:
             status = send_prepared(qb_email(built, actor))
