@@ -3,7 +3,7 @@
 
   .venv/bin/python tests/test_summary.py
 """
-import email, html, io, json, os, pathlib, tempfile, unittest, zipfile
+import email, html, io, json, os, pathlib, re, tempfile, unittest, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TMP = tempfile.mkdtemp(prefix='amex-summary-')
@@ -113,8 +113,28 @@ class SummaryTest(unittest.TestCase):
     def auth_get(self, path, user='Chris', password='local-admin'):
         return self.client.get(path, auth=(user, password))
 
-    def auth_post(self, path, user='Chris', password='local-admin'):
-        return self.client.post(path, auth=(user, password))
+    def _summary_post(self, path):
+        tail = path.rstrip('/').rsplit('/', 1)[-1]
+        return '/admin/summary/' in path and tail in ('categories', 'qb-submit')
+
+    def csrf_token(self, user='Chris', stmt=AUG):
+        page = self.auth_get(f'/admin/summary/{stmt}', user=user).get_data(as_text=True)
+        match = re.search(r"name='csrf' value='([^']+)'", page)
+        if match:
+            self._csrf = match.group(1)
+            return self._csrf
+        cached = getattr(self, '_csrf', None)
+        if cached:
+            return cached
+        self.fail('summary page did not include a csrf token')
+
+    def auth_post(self, path, user='Chris', password='local-admin', data=None, headers=None):
+        payload = None if data is None else dict(data)
+        if self._summary_post(path) and user.casefold() in ('chris', 'meghan'):
+            if payload is None:
+                payload = {}
+            payload.setdefault('csrf', self.csrf_token(user=user))
+        return self.client.post(path, data=payload, auth=(user, password), headers=headers)
 
     def grid_data(self, amounts):
         cats, amts = [], []
@@ -126,6 +146,7 @@ class SummaryTest(unittest.TestCase):
     def post_grid(self, amounts, stmt=AUG, user='Chris', path_suffix='categories'):
         data = self.grid_data(amounts)
         data['save'] = '1'
+        data['csrf'] = self.csrf_token(user=user, stmt=stmt)
         return self.client.post(
             f'/admin/summary/{stmt}/{path_suffix}',
             data=data,
@@ -702,9 +723,11 @@ class SummaryTest(unittest.TestCase):
             ('Office Expenses:Software', 0), ('Job Materials', 0),
             ('Other General and Admin Expenses', 0),
         ]
+        auto_data = self.grid_data(amounts)
+        auto_data['csrf'] = self.csrf_token()
         auto = self.client.post(
             f'/admin/summary/{AUG}/categories',
-            data=self.grid_data(amounts),
+            data=auto_data,
             headers={'Accept': 'application/json'},
             auth=('Chris', 'local-admin'),
         )
@@ -834,15 +857,17 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("value='Auto Allowance:Fuel'", edited)
         self.assertNotIn("id='summary-warning'", edited)
         self.assertIn("id='qb-submit'>Submit to QuickBooks for Pay", edited)
+        blocked_data = self.grid_data([('Not A Real Category', '1.00')])
+        blocked_data['csrf'] = self.csrf_token()
         blocked = self.client.post(
             f'/admin/summary/{AUG}/qb-submit',
-            data=self.grid_data([('Not A Real Category', '1.00')]),
+            data=blocked_data,
             auth=('Chris', 'local-admin'),
         )
         self.assertEqual(blocked.status_code, 400)
         bad_amount = self.client.post(
             f'/admin/summary/{AUG}/categories',
-            data={'cat': 'Travel Fuel', 'amt': 'nope'},
+            data={'cat': 'Travel Fuel', 'amt': 'nope', 'csrf': self.csrf_token()},
             auth=('Chris', 'local-admin'),
         )
         self.assertEqual(bad_amount.status_code, 400)
@@ -1051,6 +1076,65 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(skip_log['status'], 'skipped: no recipients')
         self.assertEqual(skip_log['to'], '')
         self.assertFalse(any(str(m['Subject']).endswith('August 2026') for m in self._summary_copies()))
+        self.assertIn('Sent for posting', self.page())
+
+    def test_summary_posts_require_csrf(self):
+        self.submit_employee(self.ada)
+        self.submit_employee(self.ben)
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            path.unlink()
+        page = self.page()
+        self.assertIn("name='csrf' value='", page)
+        self.assertIn("input[name='csrf']", page)
+        token = self.csrf_token()
+        self.assertGreaterEqual(len(token), 32)
+        amounts = [(name, 17.5 if name == 'Supplies' else 0) for name in summary.CATEGORIES]
+        data = self.grid_data(amounts)
+        cat = f'/admin/summary/{AUG}/categories'
+        qb = f'/admin/summary/{AUG}/qb-submit'
+        grid_file = pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json')
+
+        def post(path, payload, headers=None):
+            return self.client.post(path, data=payload, headers=headers, auth=('Chris', 'local-admin'))
+
+        missing = post(cat, dict(data))
+        self.assertEqual(missing.status_code, 403)
+        missing_qb = post(qb, dict(data))
+        self.assertEqual(missing_qb.status_code, 403)
+        wrong = post(cat, {**data, 'csrf': 'not-the-session-token'})
+        self.assertEqual(wrong.status_code, 403)
+        wrong_qb = post(qb, {**data, 'csrf': token + 'x'})
+        self.assertEqual(wrong_qb.status_code, 403)
+        foreign = post(cat, {**data, 'csrf': token, 'save': '1'},
+                       headers={'Origin': 'https://evil.example'})
+        self.assertEqual(foreign.status_code, 403)
+        foreign_ref = post(qb, {**data, 'csrf': token},
+                           headers={'Referer': 'https://evil.example/attack'})
+        self.assertEqual(foreign_ref.status_code, 403)
+        self.assertFalse(grid_file.exists())
+        self.assertEqual(list(pathlib.Path(app.OUTBOX).glob('*.eml')), [])
+        self.assertFalse(pathlib.Path(app.DATA_DIR, 'summaries').exists())
+        self.assertEqual([r for r in app.read_log() if r['type'] in ('qb_submit', 'summary_grid')], [])
+        self.assertEqual([r for r in app.read_log() if r.get('kind') == 'summary_grid'], [])
+
+        auto = post(cat, {**data, 'csrf': token}, headers={'Accept': 'application/json'})
+        self.assertEqual(auto.status_code, 200)
+        self.assertEqual(auto.get_json()['grid_total'], 17.5)
+        self.assertEqual(list(pathlib.Path(app.OUTBOX).glob('*.eml')), [])
+        self.assertEqual(json.loads(grid_file.read_text())['amounts']['Supplies'], 1750)
+        self.assertEqual([r for r in app.read_log() if r.get('kind') == 'summary_grid'], [])
+
+        saved = post(cat, {**data, 'csrf': token, 'save': '1'})
+        self.assertEqual(saved.status_code, 303)
+        self.assertEqual(len(list(pathlib.Path(app.OUTBOX).glob('*.eml'))), 1)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'qb_submit']), 0)
+
+        sent = post(qb, {**data, 'csrf': token}, headers={
+            'Origin': 'http://127.0.0.1:10077',
+            'Referer': f'http://127.0.0.1:10077/admin/summary/{AUG}',
+        })
+        self.assertEqual(sent.status_code, 303)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'qb_submit']), 1)
         self.assertIn('Sent for posting', self.page())
 
     def test_no_service_credentials(self):

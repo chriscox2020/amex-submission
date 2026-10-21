@@ -14,11 +14,12 @@ grid they can edit by hand. The Save button emails that grid to RECORD_TO. Sendi
 the grid for the bill emails Littledude, then emails the summary to SUMMARY_TO.
 This server does not call QuickBooks or Dropbox.
 """
-import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
+import csv, hashlib, hmac, html, io, json, os, secrets, smtplib, ssl, threading, base64
 from datetime import datetime
 from email.message import EmailMessage
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
-from flask import Flask, request, abort, Response, jsonify, redirect
+from flask import Flask, request, abort, Response, jsonify, redirect, session
 import summary
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,11 @@ TZ = ZoneInfo('America/Chicago')
 LOCK = threading.Lock()
 SUBMIT_LOCK = threading.Lock()   # run gunicorn with 1 worker so these locks are global
 app = Flask(__name__)
+# Signed cookie that holds the summary-page CSRF token. The basic-auth password
+# is sent automatically by the browser, so the summary POSTs also require this.
+app.secret_key = TOKEN_SECRET or secrets.token_hex(32)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 os.makedirs(OUTBOX, exist_ok=True)
 
 # ---------- statements & tokens ----------
@@ -924,6 +930,58 @@ def summary_actor():
     """Same Chris/Meghan password as /admin. The username is what a QB press records."""
     return need_admin()
 
+def summary_csrf_token():
+    """One token per browser session. The summary form and its autosave both send it."""
+    token = session.get('csrf_token')
+    if not isinstance(token, str) or len(token) < 32:
+        token = secrets.token_urlsafe(32)
+        session['csrf_token'] = token
+    return token
+
+def _origin_base(value):
+    """scheme://host[:port] for an Origin or Referer value, or '' when it is not a URL."""
+    raw = (value or '').strip()
+    if not raw or raw.lower() == 'null':
+        return ''
+    parts = urlsplit(raw)
+    if not parts.scheme or not parts.netloc:
+        return ''
+    return f'{parts.scheme}://{parts.netloc}'.lower()
+
+def _allowed_origin_bases():
+    """This site: the host that received the request, and PUBLIC_BASE."""
+    allowed = set()
+    if request.host:
+        allowed.add(f'{request.scheme}://{request.host}'.lower())
+    parts = urlsplit((PUBLIC_BASE or '').strip())
+    if parts.scheme and parts.netloc:
+        allowed.add(f'{parts.scheme}://{parts.netloc}'.lower())
+    return allowed
+
+def summary_request_is_same_site():
+    """A present Origin or Referer must name this site. Absent headers are left to the token."""
+    allowed = _allowed_origin_bases()
+    for name in ('Origin', 'Referer'):
+        value = request.headers.get(name)
+        if not value:
+            continue
+        if _origin_base(value) not in allowed:
+            return False
+    return True
+
+def summary_csrf_response():
+    """403 when the summary POST is missing its session token or comes from another site.
+
+    No caller may write a file, send mail, or lock the month after this returns a response.
+    """
+    expected = session.get('csrf_token')
+    posted = request.form.get('csrf') or ''
+    token_ok = (isinstance(expected, str) and bool(expected) and bool(posted)
+                and hmac.compare_digest(expected, posted))
+    if summary_request_is_same_site() and token_ok:
+        return None
+    return Response('Forbidden', 403)
+
 def summary_folder(label):
     """One path segment under /var/data/summaries. Slashes cannot escape that directory."""
     segment = str(label or 'unknown').replace('/', '-').replace('\\', '-').strip() or 'unknown'
@@ -1136,6 +1194,8 @@ function saveGrid() {
     if (centsOf(inputs[i].value) === null) return;
   }
   var body = new URLSearchParams(new FormData(form));
+  var csrf = form.querySelector("input[name='csrf']");
+  if (csrf) body.set('csrf', csrf.value);
   fetch(form.action, {
     method: 'POST',
     headers: {'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded'},
@@ -1217,6 +1277,7 @@ def render_summary_page(built, actor, qb):
         disabled = '' if built['ready'] else ' disabled'
         parts.append(f"<form id='category-grid' data-everyone='{everyone}' method='post' "
                      f"action='/admin/summary/{esc(stmt)}/categories' autocomplete='off'>")
+        parts.append(f"<input type='hidden' name='csrf' value='{esc(summary_csrf_token())}'>")
         parts.append(f"<p class='amex-total' id='amex-total' data-cents='{built['statement_cents']}'>"
                      f"<b>Amex statement total</b> {summary.format_money(built['statement_cents'])}</p>")
         parts.append("<table><tr><th>Category</th><th>Amount</th></tr>")
@@ -1448,6 +1509,9 @@ def summary_xlsx(stmt):
 def summary_save_categories(stmt):
     """Store the hand-entered category amounts for this statement."""
     actor = summary_actor()
+    denied = summary_csrf_response()
+    if denied:
+        return denied
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
@@ -1484,6 +1548,9 @@ def summary_save_categories(stmt):
 @app.post('/admin/summary/<stmt>/qb-submit')
 def summary_qb_submit(stmt):
     actor = summary_actor()
+    denied = summary_csrf_response()
+    if denied:
+        return denied
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
