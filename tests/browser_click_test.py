@@ -32,9 +32,8 @@ with sync_playwright() as p:
     pg.locator('td.cat').first.click()
     pg.locator('.dd').wait_for(state='visible')
     names = pg.locator('.dd .ddo').all_inner_texts()
-    for name in ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                 'Business Services', 'Other', 'Entertainment', 'Communications', 'Cancel'):
-        assert name in names, names
+    assert names == ['Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
+                     'Software', 'Entertainment', 'Other', 'Cancel'], names
     pg.locator('.dd .ddo.cx').click()
     pg.locator('.dd').wait_for(state='hidden')
 
@@ -92,11 +91,12 @@ with sync_playwright() as p:
     pg.fill('#fcb', 'wrong category')
     first_cat = pg.locator('td.cat').first
     original = first_cat.get_attribute('data-orig')
+    choice = 'Software' if original != 'Software' else 'Fuel'
     with pg.expect_response(lambda r: '/category/' in r.url and r.status == 200):
         first_cat.click()
-        pg.locator('.dd .ddo', has_text='Communications').click()
+        pg.locator('.dd .ddo', has_text=choice).click()
     edited = pg.locator('td.cat').first
-    assert edited.locator('.ed-cat').inner_text() == 'Communications'
+    assert edited.locator('.ed-cat').inner_text() == choice
     assert edited.locator('s.orig').inner_text() == original
     pg.screenshot(path='screenshots/browser-category-edit.png')
     pg.locator('button.sub').click()
@@ -107,7 +107,7 @@ with sync_playwright() as p:
     assert 'ref pending' in done
     assert 'Flagged charges: wrong category' in done
     assert pg.locator('#fcb').count() == 0
-    assert pg.locator('.ed-cat').first.inner_text() == 'Communications'
+    assert pg.locator('.ed-cat').first.inner_text() == choice
     pg.screenshot(path='screenshots/browser-after-submit.png')
 
     pg.goto(links['alice-cox']['url'])

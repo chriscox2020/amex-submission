@@ -78,6 +78,23 @@ exe = shutil.which('google-chrome') or shutil.which('chromium')
 
 with sync_playwright() as p:
     browser = p.chromium.launch(executable_path=exe, args=['--no-sandbox'])
+    picker_page = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
+    picker_page.goto(BASE + f'/v/{ada}')
+    assert picker_page.locator('.banner').inner_text() == 'American Express Charges'
+    assert picker_page.locator('td.cat').nth(0).inner_text() == 'Meals'
+    assert picker_page.locator('td.cat').nth(1).inner_text() == 'Travel'
+    assert 'Restaurant' not in picker_page.locator('body').inner_text()
+    assert 'Merchandise' not in picker_page.locator('body').inner_text()
+    picker_page.locator('td.cat').nth(0).click()
+    picker_page.locator('.dd').wait_for(state='visible')
+    picker = picker_page.locator('.dd .ddo').all_inner_texts()
+    assert picker == ['Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
+                      'Software', 'Entertainment', 'Other', 'Cancel'], picker
+    picker_page.locator('td.cat').nth(0).scroll_into_view_if_needed()
+    picker_page.screenshot(path=str(shots / 'category-picker.png'))
+    picker_page.locator('.dd .ddo.cx').click()
+    picker_page.close()
+
     desktop = browser.new_context(
         http_credentials={'username': 'Chris', 'password': 'local-admin'},
         viewport={'width': 1200, 'height': 1000},
@@ -91,7 +108,13 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').is_disabled()
     assert pg.locator('#qb-submit').inner_text() == 'Submit to QuickBooks for Pay'
     assert 'Not submitted' in pg.locator('body').inner_text()
-    assert 'Merchandise & Supplies' in pg.locator('body').inner_text()
+    assert 'Merchandise' not in pg.locator('body').inner_text()
+    assert 'Restaurant' not in pg.locator('body').inner_text()
+    assert 'Office Supplies' not in pg.locator('body').inner_text()
+    grid_names = pg.locator('#category-grid input.amt').evaluate_all(
+        "els => els.map(e => e.getAttribute('data-category'))")
+    assert grid_names == ['Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
+                          'Software', 'Entertainment', 'Other'], grid_names
     assert pg.locator('input[data-category="Fuel"]').input_value() == '$0.00'
     assert pg.locator('input[data-category="Parts & Materials"]').input_value() == '$0.00'
     assert pg.locator('#sent').count() == 0
@@ -123,6 +146,8 @@ with sync_playwright() as p:
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
     assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
     assert pg.locator('input[data-category="Entertainment"]').input_value() == '$5.00'
+    assert pg.locator('input[data-category="Meals"]').input_value() == '$10.00'
+    assert pg.locator('input[data-category="Supplies"]').input_value() == '-$1.00'
     assert pg.locator('#running-sum').inner_text() == '$14.00'
     pg.screenshot(path=str(shots / 'summary-category-grid.png'), full_page=True)
     post(f'/v/{ben}/submit')
@@ -148,9 +173,12 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').count() == 0
     pg.screenshot(path=str(shots / 'summary-sent.png'), full_page=True)
 
-    employee = browser.new_context(viewport={'width': 1200, 'height': 900}).new_page()
+    employee = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
     employee.goto(BASE + f'/v/{ada}')
     assert employee.locator('.banner').inner_text() == 'American Express Charges'
+    assert employee.locator('td.cat').count() == 0
+    assert 'Restaurant' not in employee.locator('body').inner_text()
+    assert 'Merchandise' not in employee.locator('body').inner_text()
     assert employee.locator('#qb-submit').count() == 0
     assert 'Submit to QuickBooks for Pay' not in employee.content()
     assert 'qb-submit' not in employee.content()

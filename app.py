@@ -206,8 +206,8 @@ def sorted_rows(rows):
 
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
-AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                   'Business Services', 'Other', 'Entertainment', 'Communications')
+# Same list the summary grid uses, in the same order.
+AMEX_CATEGORIES = summary.CATEGORIES
 
 def clean_note(raw):
     """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
@@ -304,17 +304,14 @@ def posted_note():
     return reason or note
 
 def canonical_category(value):
-    key = str(value or '').strip().casefold()
-    if not key: return ''
-    for c in AMEX_CATEGORIES:
-        if c.casefold() == key: return c
-    return ''
+    """Picker value. Blank or unknown text is rejected. Legacy Amex names map in."""
+    return summary.lookup_category(value) or ''
 
 def chosen_category(row, categories):
-    """Dropdown choice when the employee set one, otherwise a matching original category."""
-    if isinstance(categories, dict) and row.get('id') in categories:
-        return categories[row['id']] or ''
-    return canonical_category(row.get('category'))
+    """Dropdown choice when the employee set one, otherwise the mapped statement category."""
+    if isinstance(categories, dict) and row.get('id') in categories and str(categories[row['id']] or '').strip():
+        return summary.grid_category_name(categories[row['id']])
+    return summary.grid_category_name(row.get('category'))
 
 def flag_comment_line(comment):
     comment = clean_note(comment)
@@ -534,16 +531,15 @@ if(commentBox&&commentBox.getAttribute('data-action')){
 """
 
 def category_view(row, categories):
-    """Current Amex category, the statement original, and whether the employee changed it."""
-    original = str(row.get('category') or '')
+    """Mapped category, the mapped statement category, and whether the employee changed it."""
+    baseline = summary.grid_category_name(row.get('category'))
     explicit = isinstance(categories, dict) and row.get('id') in categories
     if explicit:
-        current = categories.get(row['id']) or ''
+        current = summary.grid_category_name(categories.get(row['id']))
     else:
-        current = canonical_category(original) or original
-    baseline = canonical_category(original) or original
-    edited = bool(explicit and (current or '') != baseline)
-    return current, original, edited
+        current = baseline
+    edited = bool(explicit and current != baseline)
+    return current, baseline, edited
 
 def popup_html():
     chips = []
@@ -958,7 +954,9 @@ def posted_grid_amounts():
         abort(400)
     out = {}
     for name, raw in zip(cats, amts):
-        canon = summary.grid_category_name(name)
+        canon = summary.lookup_category(name)
+        if not canon:
+            abort(400)
         try:
             out[canon] = summary.parse_money_cents(raw)
         except ValueError:

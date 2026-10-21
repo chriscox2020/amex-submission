@@ -130,10 +130,15 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.flag_comment_line('  wrong category  '), 'Flagged charges: wrong category')
         self.assertEqual(app.flag_comment_line('   '), '')
         self.assertEqual(app.canonical_category(' travel '), 'Travel')
-        self.assertEqual(app.canonical_category('Meals'), '')
+        self.assertEqual(app.canonical_category('Meals'), 'Meals')
+        self.assertEqual(app.canonical_category('restaurant'), 'Meals')
+        self.assertEqual(app.canonical_category('Merchandise & Supplies'), 'Supplies')
+        self.assertEqual(app.canonical_category('Office supplies'), 'Supplies')
+        self.assertEqual(app.canonical_category('Transportation'), 'Other')
+        self.assertEqual(app.canonical_category('nope'), '')
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
-            'Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-            'Business Services', 'Other', 'Entertainment', 'Communications'))
+            'Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
+            'Software', 'Entertainment', 'Other'))
 
     def test_sample_page_and_record_email(self):
         amazon = self.flag(1, 'not my charge')
@@ -151,10 +156,13 @@ class FlagNoteTest(unittest.TestCase):
         saved = self.client.post(f'/v/{self.token}/comment', data={'comment': 'wrong category'},
                                  headers={'Accept': 'application/json'})
         self.assertEqual(saved.get_json()['comment'], 'wrong category')
-        cat = self.client.post(f'/v/{self.token}/category/4', data={'category': 'restaurant'},
+        mapped = self.client.post(f'/v/{self.token}/category/4', data={'category': 'restaurant'},
+                                  headers={'Accept': 'application/json'})
+        self.assertEqual(mapped.get_json()['category'], 'Meals')
+        cat = self.client.post(f'/v/{self.token}/category/4', data={'category': 'Fuel'},
                                headers={'Accept': 'application/json'})
-        self.assertEqual(cat.get_json()['category'], 'Restaurant')
-        rejected = self.client.post(f'/v/{self.token}/category/4', data={'category': 'Meals'},
+        self.assertEqual(cat.get_json()['category'], 'Fuel')
+        rejected = self.client.post(f'/v/{self.token}/category/4', data={'category': 'Not a category'},
                                     headers={'Accept': 'application/json'})
         self.assertEqual(rejected.status_code, 400)
 
@@ -168,9 +176,11 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('>wrong category</textarea>', page)
         self.assertIn('>Flagged charges</label>', page)
         self.assertIn("data-orig='Travel'", page)
-        self.assertIn("<span class='edited ed-cat'>Restaurant</span><s class='orig'>Meals</s>", page)
-        for name in app.AMEX_CATEGORIES:
-            self.assertIn(json.dumps(name), page)
+        self.assertIn("data-orig='Supplies'", page)
+        self.assertNotIn('Office supplies', page)
+        self.assertNotIn('Restaurant', page)
+        self.assertIn("<span class='edited ed-cat'>Fuel</span><s class='orig'>Meals</s>", page)
+        self.assertIn(json.dumps(list(app.AMEX_CATEGORIES)), page)
 
         submitted = self.client.post(f'/v/{self.token}/submit', data={'comment': 'wrong category'})
         self.assertEqual(submitted.status_code, 303)
@@ -221,7 +231,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn(html.escape(LINE_NOTE), flagged_html)
         self.assertNotIn('AMAZON MARKETPLACE', approved_html)
         self.assertIn('JOE&#x27;S DINER', approved_html)
-        self.assertIn('Restaurant', approved_html)
+        self.assertIn('Fuel', approved_html)
         self.assertNotIn(LINE_NOTE, approved_html)
 
         sample = (
@@ -360,6 +370,10 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('>Credits</td>', page)
         self.assertIn('Net Total', page)
         self.assertIn('$10.00', page)
+        self.assertIn('>Meals<', page)
+        self.assertIn('>Supplies<', page)
+        self.assertNotIn('Restaurant', page)
+        self.assertNotIn('Merchandise', page)
         self.assertIn('&minus;$2.50', page)
         self.assertIn('$7.50', page)
         self.assertIn('>Credit</span>', page)

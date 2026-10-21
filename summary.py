@@ -1,7 +1,7 @@
 """Monthly category summary for Chris and Meghan.
 
-The bill grid lists Chris's categories, prefilled from submitted charges.
-Saved edits replace those prefills. This module builds the grid, the PDF,
+The bill grid and the employee category picker share one category list.
+Saved edits replace the prefilled amounts. This module builds the grid, the PDF,
 and the spreadsheet. It does not call QuickBooks, Dropbox, or any other
 outside service. Posting the bill is Littledude's job after the summary email arrives.
 """
@@ -9,13 +9,22 @@ import csv, io, json, re, zipfile
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                   'Business Services', 'Other', 'Entertainment', 'Communications')
-# Chris's bill categories. The summary grid always lists these, then any other
-# category that actually appears on a charge.
-ACCOUNTING_CATEGORIES = ('Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
-                         'Software', 'Office Supplies')
-UNCATEGORIZED = 'Uncategorized'
+# One list for the employee category picker and the summary grid, in this order.
+CATEGORIES = ('Travel', 'Fuel', 'Meals', 'Supplies', 'Parts & Materials',
+              'Software', 'Entertainment', 'Other')
+ACCOUNTING_CATEGORIES = CATEGORIES
+# Retired Amex names. Restaurant is meals. Merchandise & Supplies and Office
+# Supplies are supplies. Anything else that is not in CATEGORIES rolls into Other.
+LEGACY_TO_CATEGORY = {
+    'restaurant': 'Meals',
+    'merchandise & supplies': 'Supplies',
+    'office supplies': 'Supplies',
+    'transportation': 'Other',
+    'business services': 'Other',
+    'communications': 'Other',
+    'uncategorized': 'Other',
+}
+UNCATEGORIZED = 'Other'
 
 
 def to_cents(amount):
@@ -28,28 +37,34 @@ def format_money(cents):
     return f'{sign}${cents // 100:,}.{cents % 100:02d}'
 
 
-def final_category(row, categories):
-    """Employee edit wins. Otherwise the statement category, canonical when it matches."""
-    if isinstance(categories, dict) and row.get('id') in categories:
-        return categories[row['id']] or UNCATEGORIZED
-    raw = str(row.get('category') or '').strip()
-    key = raw.casefold()
-    for name in AMEX_CATEGORIES:
-        if name.casefold() == key:
-            return name
-    return raw or UNCATEGORIZED
+def lookup_category(value):
+    """A kept category name, or None when the text is blank or not a known name.
 
-
-def grid_category_name(value):
-    """Canonical bill-grid name. Accounting names win, then Amex names, else the text."""
+    Known legacy Amex names map onto the shared list. Unknown text is None so a
+    typed picker value can be rejected, while the grid rolls unknowns into Other.
+    """
     raw = str(value or '').strip()
     key = raw.casefold()
     if not key:
-        return UNCATEGORIZED
-    for name in ACCOUNTING_CATEGORIES + AMEX_CATEGORIES:
+        return None
+    if key in LEGACY_TO_CATEGORY:
+        return LEGACY_TO_CATEGORY[key]
+    for name in CATEGORIES:
         if name.casefold() == key:
             return name
-    return raw
+    return None
+
+
+def grid_category_name(value):
+    """Shared category for the grid and for charge display. Unknowns roll into Other."""
+    return lookup_category(value) or 'Other'
+
+
+def final_category(row, categories):
+    """Employee edit wins. Otherwise the statement category, mapped onto the shared list."""
+    if isinstance(categories, dict) and row.get('id') in categories:
+        return grid_category_name(categories[row['id']])
+    return grid_category_name(row.get('category'))
 
 
 def parse_money_cents(raw):
@@ -68,51 +83,26 @@ def parse_money_cents(raw):
 
 
 def category_grid(people, saved=None):
-    """Rows for the manual bill grid.
-
-    Accounting categories always come first. Any other category on a charge
-    follows, in alphabetical order. Amounts start as the sum of submitted
-    charges. A saved edit replaces the prefill for that category.
-    """
-    prefill = {name: 0 for name in ACCOUNTING_CATEGORIES}
-    extras = []
-
-    def note(value):
-        name = grid_category_name(value)
-        if name not in prefill and name not in extras:
-            extras.append(name)
-        return name
-
+    """The fixed bill grid. Submitted charges are summed into these rows only."""
+    prefill = {name: 0 for name in CATEGORIES}
     for person in people or []:
-        submitted = bool(person.get('submitted'))
+        if not person.get('submitted'):
+            continue
         for charge in person.get('charges') or []:
-            note(charge.get('original_category') or '')
-            final = note(charge.get('final_category') or '')
-            if submitted:
-                prefill[final] = prefill.get(final, 0) + int(charge.get('amount_cents') or 0)
-    rows = [(name, prefill.get(name, 0)) for name in ACCOUNTING_CATEGORIES]
-    for name in sorted(extras, key=str.casefold):
-        rows.append((name, prefill.get(name, 0)))
+            name = grid_category_name(charge.get('final_category') or '')
+            prefill[name] = prefill.get(name, 0) + int(charge.get('amount_cents') or 0)
+    rows = [(name, prefill[name]) for name in CATEGORIES]
     return resolve_grid(rows, saved)
 
 
 def resolve_grid(rows, saved):
-    """Overlay saved cents onto prefilled rows. Unknown saved names are kept."""
+    """Overlay saved cents onto the fixed rows. Legacy saved names roll into their row."""
     if not saved:
         return list(rows), sum(cents for _, cents in rows)
-    normalized = {}
+    overrides = {}
     for name, cents in saved.items():
-        normalized[grid_category_name(name)] = int(cents)
-    used = set()
-    out = []
-    for name, prefill in rows:
-        if name in normalized:
-            out.append((name, normalized[name]))
-            used.add(name)
-        else:
-            out.append((name, prefill))
-    for name in sorted((n for n in normalized if n not in used), key=str.casefold):
-        out.append((name, normalized[name]))
+        overrides[grid_category_name(name)] = int(cents)
+    out = [(name, overrides.get(name, prefill)) for name, prefill in rows]
     return out, sum(cents for _, cents in out)
 
 
