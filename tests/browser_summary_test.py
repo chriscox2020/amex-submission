@@ -170,6 +170,11 @@ with sync_playwright() as p:
         return found
 
     assert not any(s.startswith('Amex summary grid SAVED:') for s in saved_subjects())
+    pg.locator('input[data-category="Travel Fuel"]').click()
+    pg.keyboard.press('Enter')
+    pg.wait_for_timeout(400)
+    assert '/admin/summary/' in pg.url
+    assert not any(s.startswith('Amex summary grid SAVED:') for s in saved_subjects())
     pg.locator('#save-categories').click()
     pg.locator('#grid-saved').wait_for()
     assert pg.locator('#grid-saved').inner_text() == 'Saved Oct 21, 2026 9:30 AM CT by Chris.'
@@ -193,6 +198,22 @@ with sync_playwright() as p:
         'Are you sure? This will submit the August 2026 category totals.')
     assert pg.locator('#qb-yes').inner_text() == 'Yes'
     assert pg.locator('#qb-cancel').inner_text() == 'Cancel'
+    assert pg.locator('#qb-yes').is_enabled()
+    yes_disabled = pg.evaluate("""() => new Promise(resolve => {
+      const btn = document.getElementById('qb-yes');
+      const form = btn.form;
+      function stop(ev) {
+        if (ev.submitter && ev.submitter.id === 'qb-yes') {
+          ev.preventDefault();
+          form.removeEventListener('submit', stop);
+          setTimeout(() => resolve(btn.disabled), 50);
+        }
+      }
+      form.addEventListener('submit', stop);
+      btn.click();
+    })""")
+    assert yes_disabled is True
+    pg.locator('#qb-yes').evaluate('btn => { btn.disabled = false }')
     pg.screenshot(path=str(shots / 'qb-confirm.png'))
     qb_before = [r for r in app.read_log() if r['type'] == 'qb_submit']
     pg.locator('#qb-cancel').click()

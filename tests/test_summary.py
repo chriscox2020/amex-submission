@@ -374,7 +374,8 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(set(files), {pdf_name, xlsx_name, 'ada-submission.json', 'ben-submission.json'})
         self.assertTrue(files[pdf_name].startswith(b'%PDF'))
         self.assertIn(b'Meals and Entertainment: $15.00', files[pdf_name])
-        self.assertIn(b'Office Expenses:Software: $0.00', files[pdf_name])
+        self.assertIn(b'Office Expenses Software: $0.00', files[pdf_name])
+        self.assertNotIn(b'Office Expenses:Software:', files[pdf_name])
         self.assertIn('American Express charges August 2026', text)
         self.assertIn('did not contact QuickBooks or Dropbox', text)
         self.assertIn('did not contact QuickBooks or Dropbox', html_body)
@@ -411,7 +412,8 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(pdf.startswith(b'%PDF-1.4'))
         self.assertIn(b'%%EOF', pdf)
         self.assertIn(b'Meals and Entertainment: $15.00', pdf)
-        self.assertIn(b'Auto Allowance:Fuel: $0.00', pdf)
+        self.assertIn(b'Auto Allowance Fuel: $0.00', pdf)
+        self.assertNotIn(b'Auto Allowance:Fuel:', pdf)
         csv_text = (folder / csv_name).read_text()
         self.assertIn('Meals and Entertainment', csv_text)
         self.assertIn('Auto Allowance:Fuel', csv_text)
@@ -436,9 +438,21 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(self.auth_get(f'/admin/summary/{AUG}/summary.pdf', user='x').status_code, 403)
 
         again = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
-        self.assertEqual(again.status_code, 303)
+        self.assertEqual(again.status_code, 409)
+        again_page = again.get_data(as_text=True)
+        self.assertIn("id='already-sent'>This month was already sent.", again_page)
+        self.assertIn("id='sent'>Sent for posting", again_page)
         self.assertEqual(len(self.qb_messages()), 1)
         self.assertEqual(len([r for r in app.read_log() if r['type'] == 'qb_submit']), 1)
+        again_json = self.client.post(
+            f'/admin/summary/{AUG}/qb-submit',
+            data={'csrf': self.csrf_token()},
+            headers={'Accept': 'application/json'},
+            auth=('Chris', 'local-admin'),
+        )
+        self.assertEqual(again_json.status_code, 409)
+        self.assertEqual(again_json.get_json()['error'], 'already sent')
+        self.assertEqual(len(self.qb_messages()), 1)
 
         flagged = self.client.post(f'/v/{self.ada}/flag/1', data={'note': 'too late'},
                                    headers={'Accept': 'application/json'})
@@ -681,7 +695,8 @@ class SummaryTest(unittest.TestCase):
                 'Other': 800,
             },
         }
-        path.write_text(json.dumps(old, indent=1) + '\n')
+        raw_text = json.dumps(old, indent=1) + '\n'
+        path.write_text(raw_text)
         page = self.page()
         self.assertIn("data-category='Travel' value='$1.00'", page)
         self.assertIn("data-category='Travel Fuel' value='$2.00'", page)
@@ -693,25 +708,39 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("data-category='Other General and Admin Expenses' value='$8.00'", page)
         self.assertIn('>Auto Allowance Fuel</td>', page)
         self.assertIn('>Office Expenses Software</td>', page)
+        self.assertEqual(path.read_text(), raw_text)
         stored = json.loads(path.read_text())
         self.assertEqual(stored['by'], 'Chris')
         self.assertEqual(stored['ts'], '2026-10-01T12:00:00-05:00')
-        self.assertEqual(stored['stmt'], AUG)
-        self.assertEqual(stored['amounts'], {
-            'Travel': 100,
-            'Travel Fuel': 200,
-            'Meals and Entertainment': 1000,
-            'Supplies': 400,
-            'Job Materials': 500,
-            'Office Expenses:Software': 600,
-            'Other General and Admin Expenses': 800,
-        })
-        self.assertNotIn('Fuel', stored['amounts'])
-        self.assertNotIn('Meals', stored['amounts'])
-        self.assertNotIn('Entertainment', stored['amounts'])
-        self.assertEqual(json.loads(path.read_text()), stored)
+        self.assertEqual(stored['amounts']['Fuel'], 200)
+        self.assertEqual(stored['amounts']['Meals'], 300)
+        self.assertEqual(stored['amounts']['Entertainment'], 700)
+        self.assertNotIn('Travel Fuel', stored['amounts'])
+        self.assertNotIn('Meals and Entertainment', stored['amounts'])
         self.assertEqual([r for r in app.read_log() if r['type'] == 'summary_grid'], [])
         self.assertEqual([r for r in app.read_log() if r.get('kind') == 'summary_grid'], [])
+        kept = [
+            ('Travel', 1), ('Travel Fuel', 2), ('Auto Allowance:Fuel', 0),
+            ('Meals and Entertainment', 10), ('Supplies', 4),
+            ('Office Expenses:Software', 6), ('Job Materials', 5),
+            ('Other General and Admin Expenses', 8),
+        ]
+        self.assertEqual(self.post_grid(kept).status_code, 303)
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved['by'], 'Chris')
+        self.assertEqual(saved['amounts'], {
+            'Travel': 100,
+            'Travel Fuel': 200,
+            'Auto Allowance:Fuel': 0,
+            'Meals and Entertainment': 1000,
+            'Supplies': 400,
+            'Office Expenses:Software': 600,
+            'Job Materials': 500,
+            'Other General and Admin Expenses': 800,
+        })
+        self.assertNotIn('Fuel', saved['amounts'])
+        self.assertNotIn('Meals', saved['amounts'])
+        self.assertNotIn('Entertainment', saved['amounts'])
 
     def test_explicit_save_emails_the_grid_record(self):
         self.submit_employee(self.ada, 'Entertainment', 2)
@@ -739,10 +768,22 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(json.loads(grid_file.read_text())['amounts']['Supplies'], -100)
         self.assertEqual(json.loads(grid_file.read_text())['by'], 'Chris')
 
+        locked_during_send = []
+        real_send = app.send_prepared
+
+        def watch_send(msg):
+            locked_during_send.append(app.SUBMIT_LOCK.locked())
+            return real_send(msg)
+
+        app.send_prepared = watch_send
         saved = self.post_grid(amounts, user='Meghan')
+        app.send_prepared = real_send
         self.assertEqual(saved.status_code, 303)
+        self.assertEqual(locked_during_send, [False])
         page = self.page()
         self.assertIn("name='save' value='1' id='save-categories'", page)
+        self.assertIn("ev.key === 'Enter'", page)
+        self.assertIn('btn.disabled = true', page)
         self.assertIn('emails that grid', page)
         self.assertIn('Typing in a box saves here only.', page)
         messages = list(pathlib.Path(app.OUTBOX).glob('*.eml'))
@@ -871,6 +912,20 @@ class SummaryTest(unittest.TestCase):
             auth=('Chris', 'local-admin'),
         )
         self.assertEqual(bad_amount.status_code, 400)
+        bad_page = bad_amount.get_data(as_text=True)
+        self.assertIn("id='amount-error'>Enter each amount as dollars, such as 12.50 or -1.00.", bad_page)
+        self.assertIn("data-category='Travel Fuel' value='$7.50'", bad_page)
+        self.assertNotIn('nope', bad_page)
+        bad_json = self.client.post(
+            f'/admin/summary/{AUG}/categories',
+            data={'cat': 'Travel Fuel', 'amt': 'nope', 'csrf': self.csrf_token()},
+            headers={'Accept': 'application/json'},
+            auth=('Chris', 'local-admin'),
+        )
+        self.assertEqual(bad_json.status_code, 400)
+        self.assertEqual(bad_json.get_json()['error'],
+                         'Enter each amount as dollars, such as 12.50 or -1.00.')
+        self.assertEqual(json.loads(pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json').read_text())['amounts']['Travel Fuel'], 750)
         sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
         self.assertEqual(sent.status_code, 303)
         rec = next(r for r in app.read_log() if r['type'] == 'qb_submit')
@@ -905,7 +960,8 @@ class SummaryTest(unittest.TestCase):
         self.assertIn(b'Travel: $10.00', files[pdf_name])
         self.assertIn(b'Travel Fuel: $7.50', files[pdf_name])
         self.assertIn(b'Meals and Entertainment: $0.00', files[pdf_name])
-        self.assertIn(b'Auto Allowance:Fuel: $0.00', files[pdf_name])
+        self.assertIn(b'Auto Allowance Fuel: $0.00', files[pdf_name])
+        self.assertNotIn(b'Auto Allowance:Fuel:', files[pdf_name])
         ada = json.loads(files['ada-submission.json'])
         air = next(c for c in ada['charges'] if c['merchant'] == 'AIR')
         self.assertEqual(air['final_category'], 'Meals and Entertainment')
@@ -1046,23 +1102,26 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(len(self.qb_messages()), 1)
 
     def test_summary_to_drops_employees(self):
-        app.SUMMARY_TO = ' ada@coxresearch.com, books@example.com, ada@coxresearch.com '
-        self.assertEqual(app.summary_copy_recipients(), ['books@example.com'])
+        app.SUMMARY_TO = ' ada@coxresearch.com, books@example.com, Meghan@CoxResearch.com '
+        self.assertEqual(app.summary_copy_recipients(), ['Meghan@CoxResearch.com'])
+        self.assertFalse(app._coxresearch_address('books@example.com'))
+        self.assertFalse(app._coxresearch_address('meghan@coxresearch.com.evil'))
+        self.assertTrue(app._coxresearch_address('chris@coxresearch.com'))
         self.submit_employee(self.cara)
         sent = self.auth_post(f'/admin/summary/{JUL}/qb-submit', user='Meghan')
         self.assertEqual(sent.status_code, 303)
         copies = self._summary_copies()
         self.assertEqual(len(copies), 1)
-        self.assertEqual(copies[0]['To'], 'books@example.com')
+        self.assertEqual(copies[0]['To'], 'Meghan@CoxResearch.com')
         self.assertEqual(copies[0]['Subject'], 'American Express summary: July 2026')
         self.assertIsNone(copies[0]['Cc'])
         self.assertIsNone(copies[0]['Bcc'])
         self.assertNotIn('ada@', copies[0]['To'])
         self.assertNotIn('cara@', copies[0]['To'])
+        self.assertNotIn('books@', copies[0]['To'])
         self.assertNotIn('chris@', copies[0]['To'])
-        self.assertNotIn('meghan@', copies[0]['To'])
         logged = [r for r in app.read_log() if r.get('kind') == 'summary_copy']
-        self.assertEqual(logged[0]['to'], 'books@example.com')
+        self.assertEqual(logged[0]['to'], 'Meghan@CoxResearch.com')
         self.assertEqual(logged[0]['by'], 'Meghan')
 
         app.SUMMARY_TO = 'ada@coxresearch.com, ben@coxresearch.com, cara@coxresearch.com'

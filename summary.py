@@ -356,7 +356,7 @@ def build_pdf(summary):
         'Category totals (amounts entered on the summary grid)',
     ]
     for name, cents in summary['categories']:
-        lines.append(f"{name}: {format_money(cents)}")
+        lines.append(f"{display_category(name)}: {format_money(cents)}")
     lines += [
         '',
         f"Grand total: {format_money(summary['grid_cents'])}",

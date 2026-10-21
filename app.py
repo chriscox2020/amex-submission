@@ -1010,8 +1010,8 @@ def read_grid_doc(stmt):
 def read_grid(stmt):
     """Saved grid amounts in cents, or None when this statement has no saved edit.
 
-    A file still keyed by the previous category names is rewritten onto the
-    QuickBooks accounts. Who saved it, and when, stay as they were.
+    Old category names are mapped in memory. A GET does not rewrite the file.
+    The next save writes the QuickBooks account names.
     """
     doc = read_grid_doc(stmt)
     if not doc:
@@ -1022,22 +1022,7 @@ def read_grid(stmt):
             raw[str(name)] = int(cents)
         except (TypeError, ValueError):
             return None
-    migrated = summary.migrate_saved_amounts(raw)
-    if migrated != raw:
-        path = grid_path(stmt)
-        payload = {
-            'stmt': doc.get('stmt') or stmt,
-            'by': doc.get('by') or '',
-            'ts': doc.get('ts') or '',
-            'amounts': migrated,
-        }
-        text = json.dumps(payload, indent=1) + '\n'
-        with LOCK:
-            with open(path, 'w') as fh:
-                fh.write(text)
-                fh.flush()
-                os.fsync(fh.fileno())
-    return migrated
+    return summary.migrate_saved_amounts(raw)
 
 def write_grid(stmt, amounts, actor):
     path = grid_path(stmt)
@@ -1078,6 +1063,11 @@ def grid_warning(built):
         parts.append('Not everyone has submitted.')
     return ' '.join(parts)
 
+AMOUNT_MESSAGE = 'Enter each amount as dollars, such as 12.50 or -1.00.'
+
+class GridAmountError(ValueError):
+    """An amount box was not dollars. The grid file is left unchanged."""
+
 def posted_grid_amounts():
     """Form fields cat/amt, or None when the request did not include a grid."""
     cats = request.form.getlist('cat')
@@ -1094,8 +1084,24 @@ def posted_grid_amounts():
         try:
             out[canon] = summary.parse_money_cents(raw)
         except ValueError:
-            abort(400)
+            raise GridAmountError(AMOUNT_MESSAGE)
     return out
+
+def amount_error_response(doc, actor):
+    """The summary page with an inline amount message. Nothing is saved."""
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(error=AMOUNT_MESSAGE), 400
+    built = built_summary(doc)
+    page = render_summary_page(built, actor, qb_record(doc['stmt']), amount_error=AMOUNT_MESSAGE)
+    return Response(page, 400, headers={'Cache-Control': 'no-store'})
+
+def already_sent_response(doc, actor):
+    """A second QuickBooks submit. The month stays locked and no mail is sent."""
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(error='already sent'), 409
+    built = built_summary(doc)
+    page = render_summary_page(built, actor, qb_record(doc['stmt']), already_sent=True)
+    return Response(page, 409, headers={'Cache-Control': 'no-store'})
 
 def apply_posted(doc, posted):
     """Current grid (saved edits over the prefill), with this request's amounts on top."""
@@ -1183,8 +1189,22 @@ function openQbConfirm() {
 function closeQbConfirm() {
   var dialog = document.getElementById('qb-confirm');
   if (dialog) dialog.hidden = true;
+  var yes = document.getElementById('qb-yes');
+  if (yes) yes.disabled = false;
   var btn = document.getElementById('qb-submit');
   if (btn) btn.focus();
+}
+function showAmountError(message) {
+  var box = document.getElementById('grid-note');
+  if (!box) return;
+  var err = document.getElementById('amount-error');
+  if (!err) {
+    err = document.createElement('p');
+    err.id = 'amount-error';
+    err.className = 'warn';
+    box.insertBefore(err, box.firstChild);
+  }
+  err.textContent = message || 'Enter each amount as dollars, such as 12.50 or -1.00.';
 }
 function saveGrid() {
   var form = document.getElementById('category-grid');
@@ -1202,10 +1222,24 @@ function saveGrid() {
     body: body.toString(),
     credentials: 'same-origin'
   }).then(function(r) {
-    var note = document.getElementById('grid-saved');
-    if (r.ok && note) note.textContent = 'Saved.';
+    if (r.ok) {
+      var note = document.getElementById('grid-saved');
+      if (note) note.textContent = 'Saved.';
+      var err = document.getElementById('amount-error');
+      if (err && err.parentNode) err.parentNode.removeChild(err);
+      return;
+    }
+    r.json().then(function(body) {
+      showAmountError(body && body.error);
+    }).catch(function() { showAmountError(''); });
   });
 }
+var gridForm = document.getElementById('category-grid');
+if (gridForm) gridForm.addEventListener('keydown', function(ev) {
+  if (ev.key === 'Enter' && ev.target && ev.target.classList && ev.target.classList.contains('amt')) {
+    ev.preventDefault();
+  }
+});
 var gridInputs = document.querySelectorAll('#category-grid input.amt');
 for (var i = 0; i < gridInputs.length; i++) {
   gridInputs[i].addEventListener('input', refresh);
@@ -1215,10 +1249,15 @@ var qbBtn = document.getElementById('qb-submit');
 if (qbBtn) qbBtn.addEventListener('click', openQbConfirm);
 var qbCancel = document.getElementById('qb-cancel');
 if (qbCancel) qbCancel.addEventListener('click', closeQbConfirm);
+var qbYes = document.getElementById('qb-yes');
+if (qbYes) qbYes.addEventListener('click', function() {
+  var btn = this;
+  setTimeout(function() { btn.disabled = true; }, 0);
+});
 refresh();
 """
 
-def render_summary_page(built, actor, qb):
+def render_summary_page(built, actor, qb, amount_error='', already_sent=False):
     esc = html.escape
     period = built['period']
     stmt = built['stmt']
@@ -1245,10 +1284,13 @@ def render_summary_page(built, actor, qb):
              "#qb-cancel,#qb-yes{font-size:16px;padding:8px 16px;border-radius:6px;cursor:pointer}",
              "#qb-cancel{background:#fff;border:1px solid #888;margin-right:8px}",
              "#qb-yes{background:#0a5;color:#fff;border:0}",
+             "#qb-yes:disabled{background:#9aa;cursor:default}",
              ".hint{color:#555;font-size:14px;max-width:760px}</style></head><body>",
              f"<div class='top'><h1>{esc(period['month_label'])} American Express</h1></div><div class='sheet'>",
              f"<p>Signed in as {esc(actor)}. Statement close date: {esc(period['close_date'])}.</p>",
              f"<p>Month folder: {esc(period['folder_label'])}.</p>",
+             "<p class='warn' id='already-sent'>This month was already sent.</p>" if already_sent else '',
+             f"<p class='warn' id='amount-error'>{esc(amount_error)}</p>" if amount_error else '',
              "<h2>Cardholders</h2><table id='cardholders'><tr><th>Employee</th><th>Status</th><th>Total charges</th></tr>"]
     for person in built['people']:
         if person['submitted']:
@@ -1354,12 +1396,19 @@ def parse_address_list(raw, default):
         out.append(addr)
     return out
 
+def _coxresearch_address(addr):
+    """True when the mailbox is exactly @coxresearch.com."""
+    local, sep, domain = str(addr or '').rpartition('@')
+    return bool(sep) and bool(local.strip()) and domain.casefold() == 'coxresearch.com'
+
 def summary_copy_recipients():
     """SUMMARY_TO, or Chris and Meghan when that is blank. Employee addresses are removed.
 
-    Chris and Meghan stay even if a cardholder record uses one of those inboxes.
+    Only @coxresearch.com addresses are kept. Chris and Meghan stay even if a
+    cardholder record uses one of those inboxes.
     """
-    configured = parse_address_list(SUMMARY_TO, ', '.join(OWNER_SUMMARY_TO))
+    configured = [addr for addr in parse_address_list(SUMMARY_TO, ', '.join(OWNER_SUMMARY_TO))
+                  if _coxresearch_address(addr)]
     owners = {addr.casefold() for addr in OWNER_SUMMARY_TO}
     blocked = set()
     for doc in load_statements().values():
@@ -1515,9 +1564,13 @@ def summary_save_categories(stmt):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    posted = posted_grid_amounts()
+    try:
+        posted = posted_grid_amounts()
+    except GridAmountError:
+        return amount_error_response(doc, actor)
     if posted is None:
         abort(400)
+    mail = None
     with SUBMIT_LOCK:
         if qb_record(stmt):
             if 'application/json' in request.headers.get('Accept', ''):
@@ -1532,13 +1585,17 @@ def summary_save_categories(stmt):
             append({'type': 'summary_grid', 'stmt': stmt, 'by': actor, **meta(),
                     'categories': payload['categories'], 'grid_total': payload['grand_total']})
         # The Save button posts save=1. The per-input autosave does not, so it stays local.
+        # The email goes out after this lock so a slow send does not block the other posts.
         if request.form.get('save') == '1':
-            try:
-                status = send_email(*grid_record_email(built, stored))
-            except Exception as ex:
-                status = f'error: {type(ex).__name__}: {ex}'
-            append({'type': 'email', 'stmt': stmt, 'by': actor, 'ts': stored['ts'],
-                    'to': RECORD_TO, 'cc': RECORD_CC, 'status': status, 'kind': 'summary_grid'})
+            mail = (built, stored, actor)
+    if mail:
+        built, stored, actor = mail
+        try:
+            status = send_email(*grid_record_email(built, stored))
+        except Exception as ex:
+            status = f'error: {type(ex).__name__}: {ex}'
+        append({'type': 'email', 'stmt': stmt, 'by': actor, 'ts': stored['ts'],
+                'to': RECORD_TO, 'cc': RECORD_CC, 'status': status, 'kind': 'summary_grid'})
     if 'application/json' in request.headers.get('Accept', ''):
         return jsonify(ok=True, grid_total=round(built['grid_cents'] / 100, 2),
                        statement_total=round(built['statement_cents'] / 100, 2),
@@ -1554,10 +1611,13 @@ def summary_qb_submit(stmt):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    posted = posted_grid_amounts()
+    try:
+        posted = posted_grid_amounts()
+    except GridAmountError:
+        return amount_error_response(doc, actor)
     with SUBMIT_LOCK:
         if qb_record(stmt):
-            return redirect(f'/admin/summary/{stmt}', 303)
+            return already_sent_response(doc, actor)
         built = apply_posted(doc, posted)
         if not built['ready']:
             return jsonify(error='not ready', difference=round(built['difference_cents'] / 100, 2)), 409
