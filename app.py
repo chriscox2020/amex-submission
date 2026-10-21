@@ -1,8 +1,14 @@
 """Cox Research - American Express employee verification page.
 One page per employee per statement, reached by an unguessable token link.
-  Flag   = one click, toggles a row ("Needs review before the bill is paid.")
+  Flag   = the red button opens a Note/Reason popup (five presets plus a typed
+           note, 500 characters). Save stores the note, flags the row, closes
+           the popup, and moves to the next charge. Clicking a flagged row
+           again clears it. Credits cannot be flagged or recategorized.
   Submit = one click, approves all unflagged rows, appends to the log on the
            persistent disk, and emails a record to RECORD_TO automatically.
+           Each flagged line is charge date, merchant, amount, flagged date,
+           reference (or "ref pending"), then the note.
+Charge review stays in this app. Submitting writes the log and the record email only.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
 from datetime import datetime
@@ -18,8 +24,19 @@ TOKEN_SECRET = os.environ.get('TOKEN_SECRET', '')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
 PUBLIC_BASE = os.environ.get('PUBLIC_BASE', 'https://amex.coxresearch.com').rstrip('/')
 EMAIL_MODE = os.environ.get('EMAIL_MODE', 'dryrun')          # dryrun | smtp | resend
-RECORD_TO = os.environ.get('RECORD_TO', 'littledude@coxresearch.com')
+# Submission records. A stale littledude@coxresearch.com env value is rewritten
+# so the live service still delivers to this address.
+RECORD_ADDRESS = 'littledude@mail.grokbot.com'
+def normalize_record_to(raw):
+    raw = (raw or '').strip()
+    if raw in ('', 'littledude@coxresearch.com'):
+        return RECORD_ADDRESS
+    return raw
+RECORD_TO = normalize_record_to(os.environ.get('RECORD_TO', ''))
 RECORD_CC = os.environ.get('RECORD_CC', '')                   # optional, e.g. chris@coxresearch.com
+# PERMANENT (Chris, Oct 21 2026): Alice E Cox's page link and verification email
+# ALWAYS go to this address, never alice@. Do not change on go-live or later.
+ALICE_SEND_TO = 'chris@coxresearch.com'
 MAIL_FROM = os.environ.get('MAIL_FROM', 'Chris AI <littledude@coxresearch.com>')
 TZ = ZoneInfo('America/Chicago')
 LOCK = threading.Lock()
@@ -28,15 +45,76 @@ app = Flask(__name__)
 os.makedirs(OUTBOX, exist_ok=True)
 
 # ---------- statements & tokens ----------
-def load_statements():
-    """Repo statements/ plus any uploaded to DATA_DIR/statements (disk wins)."""
+def bundle_rev(doc):
+    try:
+        return int((doc or {}).get('bundle_rev') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def _norm_name(value):
+    return ' '.join(str(value or '').upper().split())
+
+def is_alice(emp):
+    """Alice E Cox, matched by id or name. Not a substring of any other person."""
+    if not isinstance(emp, dict):
+        return False
+    if str(emp.get('id') or '').lower() == 'alice-cox':
+        return True
+    return _norm_name(emp.get('name')) in ('ALICE E COX', 'ALICE COX')
+
+def lock_routing(doc):
+    """Force Alice's send-to. An uploaded email of alice@ cannot override this."""
+    if not isinstance(doc, dict):
+        return doc
+    for e in doc.get('employees') or []:
+        if is_alice(e):
+            e['email'] = ALICE_SEND_TO
+            e['send_to'] = ALICE_SEND_TO
+    return doc
+
+def _load_stmt_dir(d):
+    """JSON files directly in d. Subdirectories (statements/bundled) are separate."""
     out = {}
-    for d in (os.path.join(APP_DIR, 'statements'), os.path.join(DATA_DIR, 'statements')):
-        if os.path.isdir(d):
-            for f in sorted(os.listdir(d)):
-                if f.endswith('.json'):
-                    doc = json.load(open(os.path.join(d, f)))
-                    out[doc['stmt']] = doc
+    if not os.path.isdir(d):
+        return out
+    for f in sorted(os.listdir(d)):
+        path = os.path.join(d, f)
+        if f.endswith('.json') and os.path.isfile(path):
+            with open(path) as fh:
+                doc = json.load(fh)
+            if isinstance(doc, dict) and doc.get('stmt'):
+                out[doc['stmt']] = doc
+    return out
+
+def load_statements():
+    """Bundled, repo, and disk statements. The highest bundle_rev wins.
+
+    A disk file with no bundle_rev (0) loses to the bundled Sep 22 statement,
+    and that bundled copy is written onto the disk so the next boot agrees.
+    /admin/upload sets a higher bundle_rev, so a later upload still wins.
+    """
+    bundled = _load_stmt_dir(os.path.join(APP_DIR, 'statements', 'bundled'))
+    repo = _load_stmt_dir(os.path.join(APP_DIR, 'statements'))
+    disk_dir = os.path.join(DATA_DIR, 'statements')
+    disk = _load_stmt_dir(disk_dir)
+    out = {}
+    for key in set(bundled) | set(repo) | set(disk):
+        cands = []
+        for i, src in enumerate((bundled.get(key), repo.get(key), disk.get(key))):
+            if src:
+                cands.append((bundle_rev(src), i, src))
+        chosen = cands[-1][2]
+        b = bundled.get(key)
+        if b and bundle_rev(b) > bundle_rev(disk.get(key)):
+            chosen = b
+            lock_routing(chosen)
+            os.makedirs(disk_dir, exist_ok=True)
+            with open(os.path.join(disk_dir, key + '.json'), 'w') as fh:
+                json.dump(chosen, fh, indent=1)
+                fh.write('\n')
+        else:
+            lock_routing(chosen)
+        out[key] = chosen
     return out
 
 def make_token(stmt, emp_id):
@@ -67,33 +145,187 @@ def read_log():
     return out
 
 def state(stmt, emp_id):
-    flags, submitted = set(), None
+    """Flags (row id -> {note, ts}), submit snapshot, overall comment, category choices.
+
+    A dict still supports the `in` and `len` checks callers already use.
+    Log lines written before notes existed have no note key; those stay valid.
+    A category choice is recorded only after the employee uses the dropdown.
+    """
+    flags, submitted, comment, categories = {}, None, '', {}
     for r in read_log():
         if r.get('stmt') != stmt or r.get('emp_id') != emp_id: continue
-        if r['type'] == 'flag': flags.add(r['row'])
-        elif r['type'] == 'unflag': flags.discard(r['row'])
+        if r['type'] == 'flag':
+            flags[r['row']] = {'note': r.get('note') or '', 'ts': r.get('ts') or ''}
+        elif r['type'] == 'unflag': flags.pop(r.get('row'), None)
+        elif r['type'] == 'comment': comment = r.get('comment') or ''
+        elif r['type'] == 'category': categories[r['row']] = r.get('category') or ''
         elif r['type'] == 'submit': submitted = r
-        elif r['type'] == 'reset': flags, submitted = set(), None
-    return flags, submitted
+        elif r['type'] == 'reset': flags, submitted, comment, categories = {}, None, '', {}
+    return flags, submitted, comment, categories
 
 # ---------- email ----------
-def money(a): return f'${a:,.2f}'
+def money(a): return f'${float(a):,.2f}'
 
-def record_email(doc, e, flagged, approved, ts):
+def money_signed(a):
+    a = float(a)
+    if a < 0:
+        return '&minus;' + money(abs(a))
+    return money(a)
+
+def sorted_rows(rows):
+    def key(r):
+        try:
+            dt = datetime.strptime(str(r.get('date') or ''), '%m/%d/%Y')
+        except Exception:
+            dt = datetime.min
+        try:
+            rid = int(r.get('id') or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        return (dt, rid)
+    return sorted(rows, key=key)
+
+NOTE_MAX = 500
+REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
+AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
+                   'Business Services', 'Other', 'Entertainment', 'Communications')
+
+def clean_note(raw):
+    """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
+    if raw is None: return ''
+    s = str(raw).replace('\r\n', '\n').replace('\r', '\n').replace('\n', ' ').replace('\t', ' ')
+    s = ''.join(ch for ch in s if ord(ch) >= 32).strip()
+    if len(s) > NOTE_MAX: s = s[:NOTE_MAX].rstrip()
+    return s
+
+def charge_ref(row):
+    """Reference number on the charge, or 'ref pending' when the row has none."""
+    if isinstance(row, dict):
+        for k in REF_KEYS:
+            v = row.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return 'ref pending'
+
+def flag_day(ts):
+    if not ts: return ''
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=TZ)
+        return dt.astimezone(TZ).strftime('%m/%d/%Y')
+    except Exception:
+        return str(ts)[:10]
+
+def flag_line(row, note, flagged_ts):
+    """charge date | merchant | amount | flagged date | reference | Note: text
+
+    The note is omitted when blank. Callers HTML-escape the whole line.
+    """
+    parts = [str(row.get('date') or ''), str(row.get('company') or ''), money(row.get('amount') or 0),
+             flag_day(flagged_ts), charge_ref(row)]
+    line = ' | '.join(parts)
+    note = clean_note(note)
+    if note: line += ' | Note: ' + note
+    return line
+
+def flag_meta(flags, row_id):
+    if isinstance(flags, dict):
+        info = flags.get(row_id)
+        if isinstance(info, dict): return info
+    return {}
+
+def attach_flag_meta(rows, flags):
+    out = []
+    for r in rows:
+        item = dict(r)
+        info = flag_meta(flags, r['id'])
+        item['note'] = info.get('note') or ''
+        item['flagged_ts'] = info.get('ts') or ''
+        out.append(item)
+    return out
+
+def flag_items_html(rows, flags):
+    items = []
+    for r in rows:
+        if r['id'] not in flags: continue
+        info = flag_meta(flags, r['id'])
+        line = flag_line(r, info.get('note', ''), info.get('ts', ''))
+        items.append(f"<li data-row='{int(r['id'])}'>{html.escape(line)}</li>")
+    return ''.join(items)
+
+def posted_field(name):
+    """Form or JSON field. None when the field was not sent. Never from the query string."""
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and name in data:
+        return data.get(name)
+    if name in request.form:
+        return request.form.get(name)
+    return None
+
+FLAG_REASONS = ('Wrong category', 'Wrong price', 'Duplicate charge', 'Not my charge', 'Other')
+
+def is_credit_row(row):
+    try:
+        return float(row.get('amount') or 0) < 0
+    except (TypeError, ValueError):
+        return False
+
+def posted_note():
+    """Optional flag note. A preset reason and a typed note are joined as 'Reason: text'."""
+    raw = posted_field('note')
+    reason_raw = posted_field('reason')
+    note = '' if raw is None else clean_note(raw)
+    if reason_raw is None:
+        return note
+    reason = str(reason_raw).strip()
+    if reason not in FLAG_REASONS:
+        reason = ''
+    if reason and note:
+        return clean_note(reason + ': ' + note)
+    return reason or note
+
+def canonical_category(value):
+    key = str(value or '').strip().casefold()
+    if not key: return ''
+    for c in AMEX_CATEGORIES:
+        if c.casefold() == key: return c
+    return ''
+
+def chosen_category(row, categories):
+    """Dropdown choice when the employee set one, otherwise a matching original category."""
+    if isinstance(categories, dict) and row.get('id') in categories:
+        return categories[row['id']] or ''
+    return canonical_category(row.get('category'))
+
+def flag_comment_line(comment):
+    comment = clean_note(comment)
+    if not comment: return ''
+    return 'Flagged charges: ' + comment
+
+def record_email(doc, e, flagged, approved, ts, comment=''):
     subj = f"Amex verification SUBMITTED: {e['name']} - {doc['label']} - {len(flagged)} flagged"
     def tbl(rows):
         if not rows: return '<p><i>None</i></p>'
         t = ''.join(f"<tr><td style='padding:4px 8px'>{r['date']}</td><td style='padding:4px 8px'>{html.escape(r['category'])}</td>"
-                    f"<td style='padding:4px 8px'>{html.escape(r['company'])}</td><td style='padding:4px 8px;text-align:right'>{money(r['amount'])}</td></tr>" for r in rows)
-        return f"<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'><tr><th>Date</th><th>Description</th><th>Company</th><th>Amount</th></tr>{t}</table>"
+                    f"<td style='padding:4px 8px'>{html.escape(r['company'])}</td><td style='padding:4px 8px;text-align:right'>{money(r['amount'])}</td>"
+                    f"<td style='padding:4px 8px'>{html.escape(r.get('amex_category') or '')}</td></tr>" for r in rows)
+        return ("<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'><tr><th>Date</th><th>Description</th>"
+                f"<th>Company</th><th>Amount</th><th>Category</th></tr>{t}</table>")
+    def flag_html(rows):
+        if not rows: return '<p><i>None</i></p>'
+        return ''.join("<p style='margin:4px 0;font-size:13px'>" + html.escape(flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))) + "</p>" for r in rows)
     ft = sum(r['amount'] for r in flagged); at = sum(r['amount'] for r in approved)
+    comment_line = flag_comment_line(comment)
+    comment_html = f"<p style='margin:8px 0;font-size:13px'>{html.escape(comment_line)}</p>" if comment_line else ''
+    comment_text = comment_line + '\n' if comment_line else ''
     body = (f"<div style='font-family:Arial,Helvetica,sans-serif'><p><b>{html.escape(e['name'])}</b> submitted the {html.escape(doc['label'])} "
             f"(statement {doc['stmt']}) on {nice(ts)}.</p>"
-            f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{tbl(flagged)}"
+            f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{flag_html(flagged)}{comment_html}"
             f"<p><b>Approved ({len(approved)}, {money(at)}):</b></p>{tbl(approved)}"
             f"<p style='color:#777;font-size:12px'>Automatic record from {PUBLIC_BASE}. Saved to the log on the server.</p></div>")
     text = (f"{e['name']} submitted {doc['label']} ({doc['stmt']}) at {ts}.\nFlagged ({len(flagged)}, {money(ft)}):\n" +
-            ''.join(f"  {r['date']} {r['category']} | {r['company']} | {money(r['amount'])}\n" for r in flagged) +
+            ''.join(f"  {flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))}\n" for r in flagged) +
+            comment_text +
             f"Approved ({len(approved)}, {money(at)}).\n")
     return subj, body, text
 
@@ -121,63 +353,251 @@ def send_email(subj, body, text):
     open(fn, 'wb').write(bytes(msg)); return 'dryrun:' + fn
 
 # ---------- page ----------
-TH = 'background:#006fcf;color:#ffffff;padding:12px;text-align:left;font-size:15px;white-space:nowrap'
-TD = 'padding:14px 12px;border-bottom:1px solid #d9dde3;font-size:15px;vertical-align:middle'
-CSS = """body{margin:0;background:#fff;font-family:Arial,Helvetica,sans-serif;color:#222}
-.wrap{max-width:1000px;margin:0 auto;padding:16px}
-.fl{display:inline-block;min-width:90px;text-align:center;padding:12px 28px;border:2px solid #e0b000;border-radius:6px;background:#ffd600;color:#4a3b00;font-size:16px;font-weight:bold;white-space:nowrap;cursor:pointer}
-.fl.on{background:#c62828;border-color:#8e0000;color:#fff}
-tr.flagged td{background:#fff3cd!important}
-.sub{display:inline-block;min-width:60px;padding:14px 40px;border:2px solid #2e7d32;border-radius:6px;background:#2e7d32;color:#fff;font-size:18px;font-weight:bold;cursor:pointer}
-button:disabled{opacity:.6;cursor:default}
-.done{background:#e8f5e9;border:1px solid #2e7d32;border-radius:8px;padding:14px 16px;font-size:16px;margin:12px 0}
-@media(max-width:640px){.wrap{padding:8px}.fl{padding:9px 8px!important;min-width:0!important;font-size:13px!important}.fl .t{display:none}td,th{padding:9px 5px!important;font-size:13px!important}}"""
+CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
+.banner{background:#006fcf;color:#fff;font-size:44px;font-weight:bold;text-align:center;padding:22px 12px;margin:0 0 18px;width:100%;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+h1{font-size:36px;margin:0 18px 16px;text-align:left;font-weight:bold}
+.sheet{margin:0 18px 40px}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:8px 10px;vertical-align:top}th{background:#e8e8e8;text-align:left}
+.n{text-align:right;white-space:nowrap}.c{text-align:center}.fc{position:relative;width:70px}
+tr.f td{background:#ffecec}tr.ed td{background:#e3f0ff}tr.cr td{background:#f3fbf3}tr.nx td{background:#fff7cc}
+.lbl{color:#c00;font-weight:bold;font-size:15px}
+.fb{font-size:22px;padding:2px 10px;background:#fff;border:2px solid #d00;color:#d00;border-radius:4px;cursor:pointer}
+.fb.on{background:#d00;color:#fff}button:disabled{opacity:.6;cursor:default}
+.pop{position:fixed;left:50%;top:12%;transform:translateX(-50%);width:min(380px,calc(100vw - 24px));z-index:20;text-align:left;border:2px solid #333;background:#fff;padding:8px;box-shadow:2px 2px 8px #888}
+.pop[hidden]{display:none!important}
+.chips{margin:8px 0;display:flex;flex-wrap:wrap;gap:8px}.pop .chip{display:inline-block;margin:0;font-weight:normal;font-size:17px;border:1px solid #888;border-radius:16px;padding:4px 10px;cursor:pointer}
+.sv{font-size:18px;padding:4px 16px;cursor:pointer}.pop textarea{width:95%;height:50px;font-size:18px;display:block;margin:6px 0}
+label.boxlabel{display:block;font-weight:bold;margin:24px 0 6px}
+#fcb{width:100%;box-sizing:border-box;height:110px;font-size:20px;border:2px solid #333;padding:8px}
+#flaglist{margin:16px 0 0;padding-left:18px}#flaglist li,.done li{margin:6px 0;font-size:15px;line-height:1.4}
+td.cat{position:relative;cursor:pointer}td.cat:hover{outline:2px solid #69c}
+.edited{font-weight:bold}.ed-cat{color:#06c}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
+s.orig{display:block;font-size:14px;color:#888;font-weight:normal}
+.dd{position:absolute;left:0;top:100%;z-index:6;width:min(300px,80vw);background:#fff;border:2px solid #333;box-shadow:2px 2px 8px #888;text-align:left}
+.ddh{font-weight:bold;padding:6px 10px;background:#eee;font-size:17px}.ddo{padding:6px 10px;font-size:18px;border-top:1px solid #ddd;cursor:pointer}
+.ddo:hover{background:#e3f0ff}.ddo.cur{font-weight:bold}.ddo.cx{color:#a00}
+.crn{color:#080;font-weight:bold}.crl{font-size:14px;color:#080;font-weight:bold;border:1px solid #080;border-radius:4px;padding:1px 6px;margin-left:6px}
+tr.ft td{background:#f6f6f6;font-size:22px}tr.net td{font-weight:bold;font-size:24px;background:#eaeaea}
+.done{background:#e8f5e9;border:1px solid #2e7d32;border-radius:8px;padding:14px 16px;font-size:16px;margin:0 0 16px}
+.sub{margin-top:24px;font-size:28px;padding:14px 60px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}
+.prt{margin-top:24px;margin-left:12px;font-size:28px;padding:14px 50px;background:#fff;color:#333;border:2px solid #333;border-radius:6px;cursor:pointer}
+@media(max-width:700px){body{font-size:15px}.banner{font-size:28px;padding:16px 8px}h1{font-size:26px;margin:0 8px 12px}.sheet{margin:0 8px 24px}
+td,th{padding:6px}.sub,.prt{font-size:20px;padding:12px 22px}#fcb{height:80px;font-size:16px}tr.ft td,tr.net td{font-size:16px}}
+@media print{button,.pop,.dd{display:none!important}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
+tr{page-break-inside:avoid}td,th{padding:4px 6px}#fcb{height:60px}tr.ft td{font-size:12pt}tr.net td{font-size:13pt}
+*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+"""
 
-JS = """document.querySelectorAll('form.f').forEach(function(f){f.addEventListener('submit',function(ev){ev.preventDefault();
-var b=f.querySelector('button');b.disabled=true;fetch(f.action,{method:'POST',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){
-var tr=f.closest('tr');tr.classList.toggle('flagged',j.flagged);b.classList.toggle('on',j.flagged);b.querySelector('.t').textContent=j.flagged?' Flagged':' Flag';
-document.getElementById('nf').textContent=j.count;b.disabled=false}).catch(function(){f.submit()})})});"""
+JS = r"""var CATS=__CATS__;
+function closeDD(){document.querySelectorAll('.dd').forEach(function(d){d.remove()})}
+function markEdited(el,v,orig,cls){
+  if(v===orig){el.textContent=orig;return false}
+  el.textContent='';
+  var n=document.createElement('span');n.className='edited '+cls;n.textContent=v;el.appendChild(n);
+  if(orig){var s=document.createElement('s');s.className='orig';s.textContent=orig;el.appendChild(s)}
+  return true}
+function openCat(td,ev){
+  if(ev.target.closest('.dd'))return;
+  closeDD();
+  var d=document.createElement('div');d.className='dd';
+  var h=document.createElement('div');h.className='ddh';h.textContent='Pick category';d.appendChild(h);
+  CATS.forEach(function(o){
+    var item=document.createElement('div');
+    item.className='ddo'+(o===(td.getAttribute('data-cur')||'')?' cur':'');
+    item.textContent=o;d.appendChild(item)});
+  var cx=document.createElement('div');cx.className='ddo cx';cx.textContent='Cancel';d.appendChild(cx);
+  d.addEventListener('click',function(e){
+    e.stopPropagation();
+    var o=e.target.closest('.ddo');if(!o)return;
+    if(!o.classList.contains('cx'))setCat(td,o.textContent);
+    closeDD()});
+  td.appendChild(d)}
+function setCat(td,v){
+  var orig=td.getAttribute('data-orig')||'';
+  fetch(td.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
+    if(!r.ok)return;
+    var changed=markEdited(td,v,orig,'ed-cat');
+    td.setAttribute('data-cur',v);
+    td.parentNode.classList.toggle('ed',!!changed);
+  })}
+document.addEventListener('click',function(e){if(!e.target.closest('td.cat'))closeDD()});
+var pop=document.getElementById('pop');
+function closePop(){pop.hidden=true;if(pop.parentNode!==document.body)document.body.appendChild(pop)}
+function paintMerchant(tr,flagged,note){
+  var m=tr.cells[1];var name=tr.getAttribute('data-merchant')||'';
+  m.textContent='';
+  if(flagged){var lbl=document.createElement('span');lbl.className='lbl';lbl.textContent='Flag charge';m.appendChild(lbl);m.appendChild(document.createTextNode(' '))}
+  m.appendChild(document.createTextNode(name));
+  if(tr.classList.contains('cr')){m.appendChild(document.createTextNode(' '));var b=document.createElement('span');b.className='crl';b.textContent='Credit';m.appendChild(b)}
+  if(flagged&&note){var rd=document.createElement('div');rd.className='rsn';var n=document.createElement('span');n.className='edited ed-note';n.textContent=note;rd.appendChild(n);m.appendChild(rd)}}
+function placeLi(list,li,row){
+  var kids=list.children;
+  for(var i=0;i<kids.length;i++){if(parseInt(kids[i].getAttribute('data-row'),10)>row){list.insertBefore(li,kids[i]);return}}
+  list.appendChild(li)}
+function applyFlag(btn,tr,j){
+  btn.classList.toggle('on',!!j.flagged);
+  btn.textContent=j.flagged?'\u2691':'\u2690';
+  btn.title=j.flagged?'Flagged':'Flag';
+  tr.classList.toggle('f',!!j.flagged);
+  paintMerchant(tr,!!j.flagged,j.note||'');
+  var list=document.getElementById('flaglist');
+  if(list){
+    var li=list.querySelector('li[data-row="'+j.row+'"]');
+    if(j.flagged){if(!li){li=document.createElement('li');li.setAttribute('data-row',String(j.row));placeLi(list,li,j.row)}li.textContent=j.line||''}
+    else if(li)li.remove()}}
+function postFlag(btn,reason,note,saving){
+  var tr=btn.closest('tr');btn.disabled=true;
+  var opts={method:'POST',headers:{'Accept':'application/json'}};
+  if(saving){opts.headers['Content-Type']='application/x-www-form-urlencoded';opts.body='reason='+encodeURIComponent(reason||'')+'&note='+encodeURIComponent(note||'')}
+  fetch(btn.getAttribute('data-action'),opts).then(function(r){
+    return r.json().then(function(j){return {ok:r.ok,j:j}},function(){throw new Error('bad')});
+  }).then(function(x){
+    btn.disabled=false;if(!x.ok)return;
+    applyFlag(btn,tr,x.j);
+    if(saving){closePop();
+      document.querySelectorAll('tr.nx').forEach(function(n){n.classList.remove('nx')});
+      var n=tr.nextElementSibling;while(n&&!n.getAttribute('data-id'))n=n.nextElementSibling;
+      if(n){n.classList.add('nx');n.scrollIntoView({block:'center',behavior:'smooth'})}}
+  }).catch(function(){btn.disabled=false})}
+function openPop(btn){
+  if(btn.disabled)return;
+  if(btn.classList.contains('on')){postFlag(btn,null,null,false);return}
+  var td=btn.parentNode;
+  if(pop.parentNode===td&&!pop.hidden){closePop();return}
+  pop.querySelectorAll('input[name=r]').forEach(function(x){x.checked=false});
+  var preset=pop.querySelector('input[name=r]');if(preset)preset.checked=true;
+  pop.querySelector('textarea').value='';
+  td.appendChild(pop);pop.hidden=false;pop.querySelector('textarea').focus()}
+function savePop(){
+  if(pop.hidden||!pop.parentNode||!pop.parentNode.classList.contains('fc'))return;
+  var btn=pop.parentNode.querySelector('.fb');if(!btn)return;
+  var reason='';pop.querySelectorAll('input[name=r]').forEach(function(x){if(x.checked)reason=x.value});
+  postFlag(btn,reason,pop.querySelector('textarea').value.slice(0,500),true)}
+document.querySelectorAll('button.fb').forEach(function(b){b.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();openPop(b)})});
+document.getElementById('popsave').addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();savePop()});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pop.hidden){ev.preventDefault();closePop()}closeDD()}});
+var commentBox=document.getElementById('fcb');
+if(commentBox&&commentBox.getAttribute('data-action')){
+  var commentTimer=null;
+  commentBox.addEventListener('input',function(){
+    clearTimeout(commentTimer);
+    commentTimer=setTimeout(function(){
+      fetch(commentBox.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'comment='+encodeURIComponent(commentBox.value.slice(0,500))}).catch(function(){});
+    },400)})}
+"""
 
-def render(doc, e, token, flags, submitted):
-    esc = html.escape; rows = e['rows']; locked = submitted is not None
-    out = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-           f"<meta name='robots' content='noindex'><title>Amex verification - {esc(e['first'])}</title><style>{CSS}</style></head><body><div class='wrap'>",
-           f"<p style='margin:8px 0 2px;font-size:20px;font-weight:bold'>{esc(e['first'])}</p>"
-           f"<p style='margin:0 0 16px;font-size:14px;color:#555'>{esc(doc.get('due','Due by the first'))}</p>"]
+def category_view(row, categories):
+    """Current Amex category, the statement original, and whether the employee changed it."""
+    original = str(row.get('category') or '')
+    explicit = isinstance(categories, dict) and row.get('id') in categories
+    if explicit:
+        current = categories.get(row['id']) or ''
+    else:
+        current = canonical_category(original) or original
+    baseline = canonical_category(original) or original
+    edited = bool(explicit and (current or '') != baseline)
+    return current, original, edited
+
+def popup_html():
+    chips = []
+    for i, reason in enumerate(FLAG_REASONS):
+        checked = ' checked' if i == 0 else ''
+        chips.append(f"<label class='chip'><input type='radio' name='r' value='{html.escape(reason)}'{checked}> {html.escape(reason)}</label>")
+    return ("<div class='pop' id='pop' hidden role='dialog' aria-modal='true' aria-labelledby='poptitle'>"
+            "<b id='poptitle'>Note/Reason</b><div class='chips'>" + ''.join(chips) + "</div>"
+            "<textarea id='popnote' maxlength='500' placeholder='Type your own note'></textarea>"
+            "<button type='button' class='sv' id='popsave'>Save</button></div>")
+
+def render(doc, e, token, flags, submitted, comment='', categories=None):
+    esc = html.escape
+    rows = sorted_rows(e['rows'])
+    locked = submitted is not None
+    categories = categories or {}
+    if submitted is not None and 'comment' in submitted:
+        comment = submitted.get('comment') or ''
+    lis = flag_items_html(rows, flags)
+    charges = [r for r in rows if not is_credit_row(r)]
+    credits = [r for r in rows if is_credit_row(r)]
+    tot_ch = sum(float(r['amount']) for r in charges)
+    tot_cr = sum(float(r['amount']) for r in credits)
+    credit_cell = f"<span class='crn'>{money_signed(tot_cr)}</span>" if credits else 'None'
+    parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head><body>"
+             f"<div class='banner'>American Express Charges</div><h1>{esc(e['name'])}</h1><div class='sheet'>"]
     if locked:
-        out.append(f"<div class='done'><b>Submitted {esc(nice(submitted['ts']))}.</b> All unflagged charges approved. "
-                   f"{len(submitted['flagged'])} flagged for review. Thank you.</div>")
-    out.append(f"<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;border-collapse:collapse;border:1px solid #d9dde3'>"
-               f"<tr><th style='{TH}'>Date</th><th style='{TH}'>Description</th><th style='{TH}'>Company</th>"
-               f"<th style='{TH};text-align:right'>Amount</th><th style='{TH};text-align:center'>Flag</th></tr>")
-    for i, r in enumerate(rows):
-        on = r['id'] in flags; bg = '#ffffff' if i % 2 == 0 else '#f5f8fc'
-        btn = (f"<form class='f' method='post' action='/v/{token}/flag/{r['id']}' style='margin:0'>"
-               f"<button class='fl{' on' if on else ''}'{' disabled' if locked else ''}>&#9873;<span class='t'> {'Flagged' if on else 'Flag'}</span></button></form>")
-        out.append(f"<tr class='{'flagged' if on else ''}' style='background:{bg}'><td style='{TD}'><b>{esc(r['date'][:5])}</b></td>"
-                   f"<td style='{TD}'>{esc(r['category'])}</td><td style='{TD}'>{esc(r['company'])}</td>"
-                   f"<td style='{TD};text-align:right'><b>{money(r['amount'])}</b></td><td style='padding:14px 8px;border-bottom:1px solid #d9dde3;text-align:center'>{btn}</td></tr>")
-    tot = sum(r['amount'] for r in rows)
-    out.append(f"<tr><td colspan='3' style='padding:14px 12px;font-size:16px;font-weight:bold'>Total ({len(rows)} charges)</td>"
-               f"<td style='padding:14px 12px;font-size:16px;font-weight:bold;text-align:right'>{money(tot)}</td>"
-               f"<td style='padding:14px 8px;text-align:center;font-size:14px;color:#555'><span id='nf'>{len(flags)}</span> flagged</td></tr></table>")
+        listed = f"<ul id='flaglist'>{lis}</ul>" if lis else ''
+        comment_html = f"<p style='margin:8px 0 0'>{esc(flag_comment_line(comment))}</p>" if flag_comment_line(comment) else ''
+        parts.append(f"<div class='done'><b>Submitted {esc(nice(submitted['ts']))}.</b> All unflagged charges approved. "
+                     f"{len(submitted['flagged'])} flagged for review. Thank you.{listed}{comment_html}</div>")
+    parts.append("<table><tr><th>Date</th><th>Merchant</th><th>Amount</th><th>Amex Category</th><th>Flag</th></tr>")
+    for r in rows:
+        rid = int(r['id'])
+        credit = is_credit_row(r)
+        on = (not credit) and (rid in flags)
+        current, original, edited = category_view(r, categories)
+        shown = current or original
+        if edited and not credit:
+            strike = f"<s class='orig'>{esc(original)}</s>" if original and original != current else ''
+            inner = f"<span class='edited ed-cat'>{esc(current)}</span>{strike}"
+        else:
+            inner = esc(shown)
+        cat_cls = '' if credit or locked else " class='cat'"
+        cat_click = '' if credit or locked else " onclick='openCat(this,event)'"
+        cat_action = '' if credit or locked else f" data-action='/v/{token}/category/{rid}'"
+        tr_cls = []
+        if credit: tr_cls.append('cr')
+        if on: tr_cls.append('f')
+        if edited and not credit: tr_cls.append('ed')
+        cls_attr = f" class='{' '.join(tr_cls)}'" if tr_cls else ''
+        merchant = []
+        if on:
+            merchant.append("<span class='lbl'>Flag charge</span> ")
+        merchant.append(esc(r['company']))
+        if credit:
+            merchant.append(" <span class='crl'>Credit</span>")
+        if on:
+            note = flag_meta(flags, rid).get('note') or ''
+            if note:
+                merchant.append(f"<div class='rsn'><span class='edited ed-note'>{esc(note)}</span></div>")
+        if credit:
+            amount = f"<span class='crn'>{money_signed(r['amount'])}</span>"
+            flag = ''
+        else:
+            amount = f"<b>{money(r['amount'])}</b>"
+            dis = ' disabled' if locked else ''
+            flag = (f"<button type='button' class='fb{' on' if on else ''}' data-action='/v/{token}/flag/{rid}' "
+                    f"title='{'Flagged' if on else 'Flag'}'{dis}>{'&#9873;' if on else '&#9872;'}</button>")
+        parts.append(f"<tr{cls_attr} data-id='{rid}' data-merchant='{esc(r['company'])}'><td>{esc(r['date'])}</td>"
+                     f"<td>{''.join(merchant)}</td><td class='n'>{amount}</td>"
+                     f"<td{cat_cls} data-orig='{esc(original)}' data-cur='{esc(shown)}'{cat_action}{cat_click}>{inner}</td>"
+                     f"<td class='c fc'>{flag}</td></tr>")
+    parts.append(f"<tr class='ft'><td colspan='2'>Total charges</td><td class='n'>{money(tot_ch)}</td><td colspan='2'></td></tr>"
+                 f"<tr class='ft'><td colspan='2'>Credits</td><td class='n'>{credit_cell}</td><td colspan='2'></td></tr>"
+                 f"<tr class='ft net'><td colspan='2'>Net Total</td><td class='n'>{money_signed(tot_ch + tot_cr)}</td><td colspan='2'></td></tr></table>")
     if not locked:
-        out.append(f"<form method='post' action='/v/{token}/submit' style='text-align:center;margin:24px 0'>"
-                   f"<button class='sub' onclick=\"this.disabled=true;this.form.submit()\">Submit</button></form>")
-    out.append("<table width='100%' style='width:100%;border-top:2px solid #d9dde3;font-size:15px;margin-top:16px'><tr><td style='padding-top:14px'>"
-               "<p style='font-weight:bold;font-size:17px;margin:0 0 10px'>Key</p>"
-               "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#b38f00'>&#9873; Flag</span>Needs review before the bill is paid.</p>"
-               "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#2e7d32'>Submit</span>Approves all unflagged charges on this chart.</p></td></tr></table>"
-               "<p style='font-size:14px;margin-top:20px'>Chris AI<br>Cox Research, Assistant<br>2252780616<br>Littledude@coxresearch.com<br><br>https://coxresearch.com</p>"
-               f"</div><script>{JS}</script></body></html>")
-    return ''.join(out)
-
+        parts.append(f"<ul id='flaglist'>{lis}</ul>"
+                     f"<form method='post' action='/v/{token}/submit'>"
+                     f"<label class='boxlabel' for='fcb'>Flagged charges</label>"
+                     f"<textarea id='fcb' name='comment' maxlength='500' data-action='/v/{token}/comment' "
+                     f"placeholder='e.g. wrong category'>{esc(comment)}</textarea>"
+                     f"<button class='sub' type='submit'>Submit</button></form>"
+                     f"<button class='prt' type='button' onclick='window.print()'>Print</button>")
+    else:
+        parts.append("<button class='prt' type='button' onclick='window.print()'>Print</button>")
+    script = JS.replace('__CATS__', json.dumps(list(AMEX_CATEGORIES)))
+    parts.append(popup_html() + f"<script>{script}</script></div></body></html>")
+    return ''.join(parts)
 def nice(ts):
     return datetime.fromisoformat(ts).strftime('%b %-d, %Y %-I:%M %p') + ' CT'
 
 def meta():
     return {'ts': now(), 'ip': request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip(),
             'ua': request.headers.get('User-Agent', '')[:300]}
+
+@app.after_request
+def stamp(resp):
+    resp.headers['X-Amex-Page'] = 'review-banner'
+    return resp
 
 @app.get('/healthz')
 def healthz(): return 'ok'
@@ -189,9 +609,9 @@ def root(): return Response('Cox Research', mimetype='text/plain')
 def view(token):
     doc, e = resolve(token)
     if not doc: abort(404)
-    flags, sub = state(doc['stmt'], e['id'])
+    flags, sub, comment, categories = state(doc['stmt'], e['id'])
     append({'type': 'open', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta()})
-    page = render(doc, e, token, flags, sub)
+    page = render(doc, e, token, flags, sub, comment, categories)
     act = request.args.get('do', ''); row = request.args.get('row', '')
     if not sub and act == 'flag' and row.isdigit() and int(row) not in flags:
         js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
@@ -209,14 +629,22 @@ def flag(token, row):
     if not doc: abort(404)
     r = next((x for x in e['rows'] if x['id'] == row), None)
     if not r: abort(404)
-    flags, sub = state(doc['stmt'], e['id'])
+    if is_credit_row(r):
+        return jsonify(error='credit'), 400
+    flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted', flagged=row in flags, count=len(flags)), 409
     on = row not in flags
-    append({'type': 'flag' if on else 'unflag', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
-            'date': r['date'], 'category': r['category'], 'company': r['company'], 'amount': r['amount'], **meta()})
+    rec = {'type': 'flag' if on else 'unflag', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
+           'date': r['date'], 'category': r['category'], 'company': r['company'], 'amount': r['amount'], **meta()}
+    if on: rec['note'] = posted_note()
+    append(rec)
     count = len(flags) + (1 if on else -1)
     if 'application/json' in request.headers.get('Accept', ''):
-        return jsonify(flagged=on, count=count)
+        payload = {'flagged': on, 'count': count, 'row': row}
+        if on:
+            payload['note'] = rec.get('note') or ''
+            payload['line'] = flag_line(r, rec.get('note', ''), rec['ts'])
+        return jsonify(payload)
     return redirect(f'/v/{token}', 303)
 
 @app.post('/v/<token>/submit')
@@ -224,19 +652,61 @@ def submit(token):
     doc, e = resolve(token)
     if not doc: abort(404)
     with SUBMIT_LOCK:
-      flags, sub = state(doc['stmt'], e['id'])
+      flags, sub, stored_comment, categories = state(doc['stmt'], e['id'])
       if not sub:
-          flagged = [r for r in e['rows'] if r['id'] in flags]; approved = [r for r in e['rows'] if r['id'] not in flags]
+          rows = sorted_rows(e['rows'])
+          flagged = attach_flag_meta([r for r in rows if r['id'] in flags], flags)
+          approved = [dict(r) for r in rows if r['id'] not in flags]
+          for r in flagged + approved:
+              r['amex_category'] = chosen_category(r, categories)
+          incoming = posted_field('comment')
+          comment = stored_comment if incoming is None else clean_note(incoming)
           rec = {'type': 'submit', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta(),
                  'flagged': [r['id'] for r in flagged], 'approved': [r['id'] for r in approved],
-                 'flagged_total': round(sum(r['amount'] for r in flagged), 2), 'approved_total': round(sum(r['amount'] for r in approved), 2)}
+                 'flagged_total': round(sum(r['amount'] for r in flagged), 2),
+                 'approved_total': round(sum(r['amount'] for r in approved), 2), 'comment': comment}
           append(rec)
           try:
-              status = send_email(*record_email(doc, e, flagged, approved, rec['ts']))
+              status = send_email(*record_email(doc, e, flagged, approved, rec['ts'], comment))
           except Exception as ex:
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
                   'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
+    return redirect(f'/v/{token}', 303)
+
+@app.post('/v/<token>/comment')
+def set_comment(token):
+    doc, e = resolve(token)
+    if not doc: abort(404)
+    _flags, sub, stored, _categories = state(doc['stmt'], e['id'])
+    if sub: return jsonify(error='already submitted'), 409
+    incoming = posted_field('comment')
+    if incoming is None: return jsonify(error='missing comment'), 400
+    text = clean_note(incoming)
+    if text != stored:
+        append({'type': 'comment', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'comment': text, **meta()})
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(ok=True, comment=text)
+    return redirect(f'/v/{token}', 303)
+
+@app.post('/v/<token>/category/<int:row>')
+def set_category(token, row):
+    doc, e = resolve(token)
+    if not doc: abort(404)
+    r = next((x for x in e['rows'] if x['id'] == row), None)
+    if not r: abort(404)
+    if is_credit_row(r):
+        return jsonify(error='credit'), 400
+    _flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
+    if sub: return jsonify(error='already submitted'), 409
+    raw = posted_field('category')
+    if raw is None: return jsonify(error='missing category'), 400
+    choice = canonical_category(raw)
+    if str(raw).strip() and not choice: return jsonify(error='invalid category'), 400
+    append({'type': 'category', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
+            'date': r['date'], 'category': choice, 'company': r['company'], 'amount': r['amount'], **meta()})
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(ok=True, row=row, category=choice)
     return redirect(f'/v/{token}', 303)
 
 # ---------- Chris-only admin ----------
@@ -251,7 +721,7 @@ def admin():
     rows = []
     for stmt, doc in sorted(load_statements().items(), reverse=True):
         for e in doc['employees']:
-            flags, sub = state(stmt, e['id'])
+            flags, sub, _comment, _categories = state(stmt, e['id'])
             link = f"{PUBLIC_BASE}/v/{make_token(stmt, e['id'])}"
             st = f"<b style='color:#2e7d32'>Submitted {esc(nice(sub['ts']))}</b>" if sub else "<b style='color:#c62828'>Not submitted</b>"
             rows.append(f"<tr><td>{stmt}</td><td>{esc(e['name'])}</td><td>{st}</td><td>{len(sub['flagged']) if sub else len(flags)}</td>"
@@ -265,10 +735,15 @@ def admin():
 def admin_csv():
     need_admin()
     cols = ['ts', 'type', 'stmt', 'emp_id', 'emp', 'row', 'date', 'category', 'company', 'amount',
-            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua']
+            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua', 'note', 'comment']
     buf = io.StringIO(); w = csv.DictWriter(buf, cols, extrasaction='ignore'); w.writeheader()
     for r in read_log():
-        w.writerow({k: (';'.join(map(str, v)) if isinstance(v, list) else v) for k, v in r.items()})
+        row = {}
+        for k, v in r.items():
+            if isinstance(v, list): v = ';'.join(map(str, v))
+            elif k in ('note', 'comment') and isinstance(v, str) and v[:1] in '=+-@\t\r': v = "'" + v
+            row[k] = v
+        w.writerow(row)
     return Response(buf.getvalue(), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename=amex-verification-log.csv'})
 
 @app.get('/admin/links.json')
@@ -282,8 +757,23 @@ def admin_upload():
     """Add/replace a statement without a redeploy: POST the statements/<stmt>.json body."""
     need_admin(); doc = request.get_json(force=True)
     assert doc.get('stmt') and isinstance(doc.get('employees'), list)
+    bundled_path = os.path.join(APP_DIR, 'statements', 'bundled', doc['stmt'] + '.json')
+    bundled = {}
+    if os.path.isfile(bundled_path):
+        with open(bundled_path) as fh:
+            bundled = json.load(fh)
+    disk_path = os.path.join(DATA_DIR, 'statements', doc['stmt'] + '.json')
+    current = {}
+    if os.path.isfile(disk_path):
+        with open(disk_path) as fh:
+            current = json.load(fh)
+    # An upload always outranks the copy shipped in the image.
+    doc['bundle_rev'] = max(bundle_rev(doc), bundle_rev(bundled), bundle_rev(current)) + 1
+    lock_routing(doc)
     d = os.path.join(DATA_DIR, 'statements'); os.makedirs(d, exist_ok=True)
-    json.dump(doc, open(os.path.join(d, doc['stmt'] + '.json'), 'w'), indent=1)
+    with open(os.path.join(d, doc['stmt'] + '.json'), 'w') as fh:
+        json.dump(doc, fh, indent=1)
+        fh.write('\n')
     return jsonify(ok=True, stmt=doc['stmt'], employees=len(doc['employees']))
 
 @app.post('/admin/reset/<stmt>/<emp_id>')

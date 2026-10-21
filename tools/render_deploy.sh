@@ -17,7 +17,7 @@ create)   curl -fsS "${H[@]}" -X POST "$API/services" -d @- <<JSON
  "envVars":[{"key":"PYTHON_VERSION","value":"3.12.7"},{"key":"DATA_DIR","value":"/var/data"},
   {"key":"PUBLIC_BASE","value":"https://amex.coxresearch.com"},{"key":"TOKEN_SECRET","generateValue":true},
   {"key":"ADMIN_PASSWORD","generateValue":true},{"key":"EMAIL_MODE","value":"dryrun"},
-  {"key":"RECORD_TO","value":"littledude@coxresearch.com"},{"key":"RECORD_CC","value":""},
+  {"key":"RECORD_TO","value":"littledude@mail.grokbot.com"},{"key":"RECORD_CC","value":""},
   {"key":"MAIL_FROM","value":"Chris AI <littledude@coxresearch.com>"},{"key":"SMTP_HOST","value":"smtp.office365.com"},
   {"key":"SMTP_PORT","value":"587"},{"key":"SMTP_USER","value":"littledude@coxresearch.com"}]}
 JSON
