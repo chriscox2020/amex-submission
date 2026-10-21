@@ -9,7 +9,7 @@ rm -rf "$DATA_DIR"; mkdir -p "$DATA_DIR"
 sleep 1.5
 B=http://127.0.0.1:$PORT
 curl -fsS $B/healthz; echo " <- healthz"
-LINK=$(curl -fsS -u x:local-admin $B/admin/links.json | .venv/bin/python -c "import sys,json;print(json.load(sys.stdin)['2026-09-22']['chris-cox']['url'])")
+LINK=$(curl -fsS -u Chris:local-admin $B/admin/links.json | .venv/bin/python -c "import sys,json;print(json.load(sys.stdin)['2026-09-22']['chris-cox']['url'])")
 T=${LINK##*/}; echo "token link: $LINK"
 echo "bad token -> $(curl -s -o /dev/null -w '%{http_code}' $B/v/AAAAAAAAAAAAAAAAAAAAAAAA)"
 echo "admin no pw -> $(curl -s -o /dev/null -w '%{http_code}' $B/admin)"
@@ -29,7 +29,7 @@ assert 'button,.pop,.dd{display:none!important}' in p
 assert '>Note/Reason</b>' in p and '>Print</button>' in p
 print('chris page: banner, 72 flags, totals, credit, print css')
 PY
-ALICE=$(curl -fsS -u x:local-admin $B/admin/links.json | .venv/bin/python -c "import sys,json;d=json.load(sys.stdin)['2026-09-22']['alice-cox'];assert d['email']=='chris@coxresearch.com',d;print(d['url'])")
+ALICE=$(curl -fsS -u Chris:local-admin $B/admin/links.json | .venv/bin/python -c "import sys,json;d=json.load(sys.stdin)['2026-09-22']['alice-cox'];assert d['email']=='chris@coxresearch.com',d;print(d['url'])")
 echo "alice link (send-to chris@coxresearch.com): $ALICE"
 curl -fsS "$ALICE" -o "$DATA_DIR/alice.html"
 .venv/bin/python - << 'PY'
@@ -87,6 +87,6 @@ if m['To'] != 'littledude@mail.grokbot.com':
     raise SystemExit('record email To is %r' % (m['To'],))
 print('email shows the flag note, ref pending, and overall comment; To littledude@mail.grokbot.com')
 PY
-echo "--- admin CSV:"; curl -fsS -u x:local-admin $B/admin/log.csv | head -3 | cut -c1-160
-curl -fsS -u x:local-admin $B/admin | grep -o "Submitted [^<]*" | head -1
+echo "--- admin CSV:"; curl -fsS -u Chris:local-admin $B/admin/log.csv | head -3 | cut -c1-160
+curl -fsS -u Chris:local-admin $B/admin | grep -o "Submitted [^<]*" | head -1
 echo "server still running pid $(cat $DATA_DIR/g.pid) on $B (stop: kill \$(cat $DATA_DIR/g.pid))"

@@ -29,7 +29,7 @@ deploy)   curl -fsS "${H[@]}" -X POST "$API/services/$SERVICE_ID/deploys" -d '{"
 domain)   curl -fsS "${H[@]}" -X POST "$API/services/$SERVICE_ID/custom-domains" -d '{"name":"amex.coxresearch.com"}' ;;
 verify)   curl -fsS "${H[@]}" -X POST "$API/services/$SERVICE_ID/custom-domains/amex.coxresearch.com/verify" ;;
 logs)     curl -fsS "${H[@]}" "$API/logs?ownerId=$OWNER_ID&resource=$SERVICE_ID&limit=100&direction=backward" ;;
-upload)   curl -fsS -u "admin:$ADMIN_PASSWORD" -H "Content-Type: application/json" -X POST \
+upload)   curl -fsS -u "Chris:$ADMIN_PASSWORD" -H "Content-Type: application/json" -X POST \
             "${BASE:-https://amex-submission.onrender.com}/admin/upload" --data-binary @"statements/$STMT.json" ;;
 *) echo "steps: owner create status env setenv deploy domain verify logs upload"; exit 1 ;;
 esac

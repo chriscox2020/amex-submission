@@ -263,7 +263,7 @@ class FlagNoteTest(unittest.TestCase):
         self.flag(1, nasty)
         raw = self.flags()[-1]['note']
         self.assertEqual(raw, nasty)
-        csv_body = self.client.get('/admin/log.csv', auth=('x', 'local-admin')).get_data(as_text=True)
+        csv_body = self.client.get('/admin/log.csv', auth=('Chris', 'local-admin')).get_data(as_text=True)
         parsed = list(csv.DictReader(io.StringIO(csv_body)))
         self.assertEqual(parsed[0]['note'], "'" + nasty)
         self.assertTrue(parsed[0]['note'].startswith("'"))

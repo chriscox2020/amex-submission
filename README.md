@@ -15,11 +15,13 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   Each flagged line is charge date, merchant, amount, flagged date, reference number (or "ref pending"), then the note. The overall comment follows those lines as `Flagged charges: <text>`. Print hides the buttons and popups. Nothing here posts to QuickBooks or American Express.
 * **Alice E Cox**: her review link and verification email always go to **chris@coxresearch.com**, never alice@. That is hardcoded and is not changed by an uploaded email address.
 * Log: `/var/data/log.jsonl` (append-only; opens, flags, unflags, submits, email results, and `qb_submit`).
-* Chris-only admin (HTTP login, any username + `ADMIN_PASSWORD`):
+* Each employee link shows only that employee's charges, notes, and submission. Print uses that same page. The token is an unguessable HMAC, and there is no list of employees or tokens.
+* Chris and Meghan admin (HTTP login, username `Chris` or `Meghan` + `ADMIN_PASSWORD`):
   `/admin` (who has / hasn't submitted + each employee's link), `/admin/log.csv`, `/admin/links.json`,
   `POST /admin/upload` (add a month), `POST /admin/reset/<stmt>/<emp-id>` (reopen a page).
+  An employee token cannot open any of these.
 * **Monthly summary** for Chris and Meghan only: `/admin/summary` and `/admin/summary/<stmt>`
-  (for example `/admin/summary/2026-09-22`). Same `ADMIN_PASSWORD`; the username must be `Chris` or `Meghan`, and that name is what gets recorded.
+  (for example `/admin/summary/2026-09-22`). Same username and `ADMIN_PASSWORD`. The username is what a QuickBooks press records.
   The page totals every submitted cardholder's charges by their final category (an edit wins over the statement default), lists every category and the grand total, and shows who has and has not submitted.
   Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`.
   The month folder name is `American Express charges <Month> <YYYY>` (for example `American Express charges October 2026`).

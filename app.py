@@ -555,8 +555,12 @@ def popup_html():
             "<button type='button' class='sv' id='popsave'>Save</button></div>")
 
 def render(doc, e, token, flags, submitted, comment='', categories=None):
+    """One cardholder only. Print uses this same HTML, so it cannot include anyone else."""
     esc = html.escape
-    rows = sorted_rows(e['rows'])
+    others = [p for p in (doc.get('employees') or []) if p.get('id') != e.get('id')]
+    if others:
+        raise RuntimeError('employee page was given another cardholder')
+    rows = sorted_rows(e.get('rows') or [])
     locked = submitted is not None
     categories = categories or {}
     if submitted is not None and 'comment' in submitted:
@@ -568,7 +572,8 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
     tot_cr = sum(float(r['amount']) for r in credits)
     credit_cell = f"<span class='crn'>{money_signed(tot_cr)}</span>" if credits else 'None'
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head><body>"
+             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head>"
+             f"<body data-employee='{esc(e['id'])}'>"
              f"<div class='banner'>American Express Charges</div><h1>{esc(e['name'])}</h1><div class='sheet'>"]
     if locked:
         listed = f"<ul id='flaglist'>{lis}</ul>" if lis else ''
@@ -657,7 +662,10 @@ def view(token):
     if not doc: abort(404)
     flags, sub, comment, categories = state(doc['stmt'], e['id'])
     append({'type': 'open', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta()})
-    page = render(doc, e, token, flags, sub, comment, categories)
+    # The token selects one employee. Drop every other cardholder before rendering or printing.
+    solo = {k: v for k, v in doc.items() if k != 'employees'}
+    solo['employees'] = [e]
+    page = render(solo, e, token, flags, sub, comment, categories)
     act = request.args.get('do', ''); row = request.args.get('row', '')
     if not sub and act == 'flag' and row.isdigit() and int(row) not in flags:
         js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
@@ -765,11 +773,25 @@ def set_category(token, row):
         return jsonify(ok=True, row=row, category=choice)
     return redirect(f'/v/{token}', 303)
 
-# ---------- Chris-only admin ----------
+# ---------- Chris and Meghan admin ----------
 def need_admin():
+    """Every /admin route. Username must be Chris or Meghan, and the password is ADMIN_PASSWORD.
+
+    An employee token is not a password and cannot open these routes.
+    """
     a = request.authorization
     if not ADMIN_PASSWORD or not a or not hmac.compare_digest(a.password or '', ADMIN_PASSWORD):
         abort(Response('Login required', 401, {'WWW-Authenticate': 'Basic realm="Cox Amex admin"'}))
+    who = SUMMARY_ACTORS.get((a.username or '').strip().casefold())
+    if not who:
+        abort(Response('Chris or Meghan only', 403))
+    return who
+
+@app.before_request
+def guard_admin():
+    path = request.path or ''
+    if path == '/admin' or path.startswith('/admin/'):
+        need_admin()
 
 @app.get('/admin')
 def admin():
@@ -845,14 +867,8 @@ def admin_reset(stmt, emp_id):
 SUMMARY_ACTORS = {'chris': 'Chris', 'meghan': 'Meghan'}
 
 def summary_actor():
-    """Same admin password as /admin. The username must be Chris or Meghan, and that name is recorded."""
-    a = request.authorization
-    if not ADMIN_PASSWORD or not a or not hmac.compare_digest(a.password or '', ADMIN_PASSWORD):
-        abort(Response('Login required', 401, {'WWW-Authenticate': 'Basic realm="Cox Amex summary"'}))
-    who = SUMMARY_ACTORS.get((a.username or '').strip().casefold())
-    if not who:
-        abort(Response('Chris or Meghan only', 403))
-    return who
+    """Same Chris/Meghan password as /admin. The username is what a QB press records."""
+    return need_admin()
 
 def summary_folder(label):
     """One path segment under /var/data/summaries. Slashes cannot escape that directory."""

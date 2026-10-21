@@ -151,7 +151,8 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(self.auth_get(f'/admin/summary/{AUG}', user='Pat').status_code, 403)
         self.assertEqual(self.auth_get(f'/admin/summary/{AUG}', user='x').status_code, 403)
         self.assertIn('Chris or Meghan only', self.auth_get(f'/admin/summary/{AUG}', user='x').get_data(as_text=True))
-        self.assertEqual(self.auth_get('/admin', user='x').status_code, 200)
+        self.assertEqual(self.auth_get('/admin', user='x').status_code, 403)
+        self.assertEqual(self.auth_get('/admin', user='Chris').status_code, 200)
         self.assertEqual(self.auth_get(f'/admin/summary/{AUG}', user='CHRIS').status_code, 200)
         self.assertEqual(self.auth_get(f'/admin/summary/{AUG}', user='meghan').status_code, 200)
         self.assertEqual(self.auth_post(f'/admin/summary/{AUG}/qb-submit', user='Pat').status_code, 403)
@@ -346,7 +347,7 @@ class SummaryTest(unittest.TestCase):
                                           headers={'Accept': 'application/json'}).status_code, 409)
         self.assertEqual(self.client.post(f'/v/{self.ada}/comment', data={'comment': 'nope'},
                                           headers={'Accept': 'application/json'}).status_code, 409)
-        reset = self.client.post(f'/admin/reset/{AUG}/ada', auth=('x', 'local-admin'))
+        reset = self.client.post(f'/admin/reset/{AUG}/ada', auth=('Chris', 'local-admin'))
         self.assertEqual(reset.status_code, 409)
         self.assertEqual(reset.get_json()['error'], 'month locked')
         self.assertEqual(self.client.get(f'/v/{self.ada}').status_code, 200)
@@ -371,6 +372,102 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue((folder / 'American Express charges July 2026 - Summary.pdf').is_file())
         self.assertTrue((folder / 'American Express charges July 2026 - Summary.xlsx').is_file())
         self.assertTrue((folder / 'submissions' / 'cara-submission.json').is_file())
+
+    def test_employee_token_cannot_see_another_or_admin(self):
+        ada_note = 'ada-private-note'
+        ben_note = 'ben-private-note'
+        ada_flag = self.client.post(f'/v/{self.ada}/flag/1', data={'note': ada_note},
+                                    headers={'Accept': 'application/json'})
+        ben_flag = self.client.post(f'/v/{self.ben}/flag/1', data={'note': ben_note},
+                                    headers={'Accept': 'application/json'})
+        self.assertEqual(ada_flag.status_code, 200)
+        self.assertIn('CAFE', ada_flag.get_json()['line'])
+        self.assertNotIn('SHOP', ada_flag.get_json()['line'])
+        self.assertIn('SHOP', ben_flag.get_json()['line'])
+        self.assertNotIn('CAFE', ben_flag.get_json()['line'])
+        self.assertNotIn(ada_note, ben_flag.get_json()['line'])
+
+        ada_page = self.client.get(f'/v/{self.ada}?employee=ben&emp_id=ben&download=all').get_data(as_text=True)
+        self.assertIn("data-employee='ada'", ada_page)
+        self.assertIn('>Ada</h1>', ada_page)
+        self.assertIn('CAFE', ada_page)
+        self.assertIn(ada_note, ada_page)
+        self.assertNotIn('SHOP', ada_page)
+        self.assertNotIn(ben_note, ada_page)
+        self.assertNotIn('>Ben</h1>', ada_page)
+        self.assertNotIn('/admin', ada_page)
+        self.assertNotIn('summary.pdf', ada_page)
+        self.assertNotIn(self.ben, ada_page)
+        self.assertIn('window.print()', ada_page)
+        self.assertEqual(ada_page.count("data-id="), 3)
+
+        ben_page = self.client.get(f'/v/{self.ben}').get_data(as_text=True)
+        self.assertIn("data-employee='ben'", ben_page)
+        self.assertIn('SHOP', ben_page)
+        self.assertIn(ben_note, ben_page)
+        self.assertNotIn('CAFE', ben_page)
+        self.assertNotIn('AIR', ben_page)
+        self.assertNotIn(ada_note, ben_page)
+        self.assertNotIn(self.ada, ben_page)
+        self.assertEqual(ben_page.count("data-id="), 1)
+
+        self.assertNotEqual(self.ada, self.ben)
+        self.assertEqual(len(self.ada), 24)
+        self.assertNotEqual(self.ada, 'ada')
+        swapped = self.ada[:-1] + ('A' if not self.ada.endswith('A') else 'B')
+        for guess in ('ada', 'ben', 'alice-cox', 'chris-cox', swapped, ''):
+            body = self.client.get('/v/' + guess).get_data(as_text=True)
+            self.assertNotEqual(self.client.get('/v/' + guess).status_code, 200)
+            self.assertNotIn('CAFE', body)
+            self.assertNotIn('SHOP', body)
+            self.assertNotIn(ada_note, body)
+            self.assertNotIn(ben_note, body)
+        self.assertEqual(self.client.get('/employees').status_code, 404)
+        self.assertEqual(self.client.get('/v').status_code, 404)
+
+        routes = [
+            ('get', '/admin'),
+            ('get', '/admin/log.csv'),
+            ('get', '/admin/links.json'),
+            ('get', '/admin/summary'),
+            ('get', f'/admin/summary/{AUG}'),
+            ('get', f'/admin/summary/{AUG}/summary.pdf'),
+            ('get', f'/admin/summary/{AUG}/summary.csv'),
+            ('get', f'/admin/summary/{AUG}/summary.xlsx'),
+            ('post', f'/admin/summary/{AUG}/qb-submit'),
+            ('post', '/admin/upload'),
+            ('post', f'/admin/reset/{AUG}/ben'),
+        ]
+        for method, path in routes:
+            attempts = (
+                {},
+                {'auth': ('Ada', self.ada)},
+                {'auth': ('Chris', self.ada)},
+                {'auth': ('ben', self.ben)},
+                {'headers': {'Authorization': 'Bearer ' + self.ada}},
+            )
+            for kwargs in attempts:
+                res = getattr(self.client, method)(path, **kwargs)
+                self.assertIn(res.status_code, (401, 403), (method, path, res.status_code))
+                body = res.get_data(as_text=True)
+                self.assertNotIn('CAFE', body)
+                self.assertNotIn('SHOP', body)
+                self.assertNotIn(ada_note, body)
+                self.assertNotIn(ben_note, body)
+                self.assertNotIn(self.ada, body)
+                self.assertNotIn(self.ben, body)
+            refused = getattr(self.client, method)(path, auth=('Ada', 'local-admin'))
+            self.assertEqual(refused.status_code, 403, path)
+            refused_body = refused.get_data(as_text=True)
+            self.assertNotIn('SHOP', refused_body)
+            self.assertNotIn(ben_note, refused_body)
+            self.assertNotIn(self.ben, refused_body)
+
+        opened = self.client.get('/admin/log.csv', auth=('Meghan', 'local-admin'))
+        self.assertEqual(opened.status_code, 200)
+        log_body = opened.get_data(as_text=True)
+        self.assertIn(ada_note, log_body)
+        self.assertIn(ben_note, log_body)
 
     def test_no_service_credentials(self):
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()
