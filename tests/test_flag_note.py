@@ -178,7 +178,9 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(again.status_code, 303)
         blocked = self.flag(4, 'too late')
         self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(len(list(pathlib.Path(app.OUTBOX).glob('*.eml'))), 1)
+        records = [email.message_from_bytes(p.read_bytes()) for p in pathlib.Path(app.OUTBOX).glob('*.eml')
+                   if str(email.message_from_bytes(p.read_bytes())['Subject'] or '').startswith('Amex verification SUBMITTED')]
+        self.assertEqual(len(records), 1)
 
         summary = self.page()
         self.assertIn('Submitted', summary)
@@ -189,7 +191,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertLess(summary.index(html.escape(LINE_NOTE)), summary.index(html.escape(LINE_HTML)))
         self.assertLess(summary.index(html.escape(LINE_HTML)), summary.index(html.escape(LINE_BLANK)))
 
-        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        msg = records[0]
         text = html_body = ''
         for part in msg.walk():
             if part.get_content_type() == 'text/plain':
@@ -200,7 +202,8 @@ class FlagNoteTest(unittest.TestCase):
                          'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 3 flagged')
         self.assertEqual(msg['To'], 'littledude@mail.grokbot.com')
         self.assertEqual(app.RECORD_TO, 'littledude@mail.grokbot.com')
-        self.assertEqual(msg['Cc'], 'chris@coxresearch.com')
+        self.assertIsNone(msg['Cc'])
+        self.assertNotIn('chris@coxresearch.com', str(msg['To']))
         self.assertIn('\n  ' + LINE_NOTE + '\n', text)
         self.assertIn('\n  ' + LINE_HTML + '\n', text)
         self.assertIn('\n  ' + LINE_BLANK + '\n', text)
@@ -297,7 +300,8 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Other'},
                                           headers={'Accept': 'application/json'}).get_json()['category'], 'Other')
         self.client.post(f'/v/{self.token}/submit', data={'comment': nasty})
-        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        msg = next(email.message_from_bytes(p.read_bytes()) for p in pathlib.Path(app.OUTBOX).glob('*.eml')
+                   if str(email.message_from_bytes(p.read_bytes())['Subject'] or '').startswith('Amex verification SUBMITTED'))
         text = html_body = ''
         for part in msg.walk():
             if part.get_content_type() == 'text/plain':

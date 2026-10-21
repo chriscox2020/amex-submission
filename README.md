@@ -11,7 +11,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 * **Amex Category**: click a charge's category and pick one of Merchandise & Supplies, Transportation, Restaurant, Travel, Business Services, Other, Entertainment, Communications. A change shows in blue with the original struck through.
 * **Submit** and **Print**: Submit approves every unflagged row, locks the page, appends to the log on the persistent disk,
   and automatically emails a record (who, statement, flagged rows, approved rows, timestamp) to
-  `RECORD_TO` = **littledude@mail.grokbot.com** (a leftover `littledude@coxresearch.com` value is rewritten to this address; optional `RECORD_CC`).
+  `RECORD_TO` = **littledude@mail.grokbot.com** only (a leftover `littledude@coxresearch.com` value is rewritten to this address). Nothing else is copied on that record.
   Each flagged line is charge date, merchant, amount, flagged date, reference number (or "ref pending"), then the note. The overall comment follows those lines as `Flagged charges: <text>`. Print hides the buttons and popups. Nothing here posts to QuickBooks or American Express.
 * **Alice E Cox**: her review link and verification email always go to **chris@coxresearch.com**, never alice@. That is hardcoded and is not changed by an uploaded email address.
 * Log: `/var/data/log.jsonl` (append-only; opens, flags, unflags, submits, email results, and `qb_submit`).
@@ -32,6 +32,9 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.
   Littledude creates the bill and files the attachments. This server stores no QuickBooks or Dropbox credentials and does not call either service.
   After the month is locked, flag, category, comment, submit, and admin reset return 409.
+  When the last cardholder is in, one summary email goes to **chris@coxresearch.com** and a separate one to `MEGHAN_EMAIL`. Each is sent once per statement. A resubmit does not send them again. That summary lists category totals, the grand total, the statement total, a mismatch warning when the totals differ, and the link to `/admin/summary/<stmt>`.
+* **Who is still out:** `GET /admin/pending.json` (Chris or Meghan) lists names and ids for the newest statement, or `?stmt=<id>` for another. No charges and no email addresses. `POST /admin/summary/<stmt>/pending-email` emails only chris@coxresearch.com, from `MAIL_FROM`, reply-to littledude@mail.grokbot.com, subject `Amex <Month YYYY>: not yet submitted`, with an approve link for each person and the line `Or reply APPROVE <name> (or APPROVE ALL).`
+* **Approve for someone:** Chris only, `POST /admin/summary/<stmt>/approve/<emp-id>`, records type `admin_approve` with note `Approved by Chris on employee's behalf` and no flags. The summary shows `Approved by Chris <time>`. It counts as submitted. It is refused after that person already submitted or after the month was sent for posting. No email goes to the employee. The confirm page is `GET` on that same path.
 * The email builder (`tools/make_email.py`) puts only "Open my charges" links in the email, never flag/submit links,
   because Outlook Safe Links and scanners auto-open links and would create fake flags.
 
@@ -58,7 +61,8 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 | `PUBLIC_BASE` | `https://amex.coxresearch.com` | preset |
 | `EMAIL_MODE` | `dryrun` → `smtp` once the mail password is in | Littledude |
 | `RECORD_TO` | `littledude@mail.grokbot.com` | preset. The old `littledude@coxresearch.com` value is rewritten to this address. |
-| `RECORD_CC` | empty, or `chris@coxresearch.com` | Chris decides |
+| `RECORD_CC` | unused. Submission records go only to `RECORD_TO`. | |
+| `MEGHAN_EMAIL` | `meghan@coxresearch.com` | preset. One all-submitted summary goes here, and a separate one goes to chris@coxresearch.com. |
 | `MAIL_FROM` | `Chris AI <littledude@coxresearch.com>` | preset |
 | `SMTP_HOST/PORT/USER` | `smtp.office365.com` / `587` / `littledude@coxresearch.com` | preset |
 | `SMTP_PASSWORD` | littledude mailbox password | **Chris, typed into the Render dashboard only** |

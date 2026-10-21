@@ -30,8 +30,10 @@ services:
         value: dryrun
       - key: RECORD_TO
         value: littledude@mail.grokbot.com
-      - key: RECORD_CC             # optional, e.g. chris@coxresearch.com
+      - key: RECORD_CC             # unused for submission records; those go only to RECORD_TO
         value: ""
+      - key: MEGHAN_EMAIL          # all-submitted summary, separate from Chris's copy
+        value: meghan@coxresearch.com
       - key: MAIL_FROM
         value: Chris AI <littledude@coxresearch.com>
       - key: SMTP_HOST

@@ -40,6 +40,10 @@ RECORD_CC = os.environ.get('RECORD_CC', '')                   # optional, e.g. c
 # PERMANENT (Chris, Oct 21 2026): Alice E Cox's page link and verification email
 # ALWAYS go to this address, never alice@. Do not change on go-live or later.
 ALICE_SEND_TO = 'chris@coxresearch.com'
+# Notices to the owners. The per-employee record still goes only to RECORD_TO.
+CHRIS_EMAIL = 'chris@coxresearch.com'
+MEGHAN_EMAIL = (os.environ.get('MEGHAN_EMAIL') or 'meghan@coxresearch.com').strip() or 'meghan@coxresearch.com'
+APPROVAL_NOTE = "Approved by Chris on employee's behalf"
 MAIL_FROM = os.environ.get('MAIL_FROM', 'Chris AI <littledude@coxresearch.com>')
 TZ = ZoneInfo('America/Chicago')
 LOCK = threading.Lock()
@@ -163,6 +167,8 @@ def state(stmt, emp_id):
         elif r['type'] == 'comment': comment = r.get('comment') or ''
         elif r['type'] == 'category': categories[r['row']] = r.get('category') or ''
         elif r['type'] == 'submit': submitted = r
+        elif r['type'] == 'admin_approve':
+            flags, comment, submitted = {}, '', r
         elif r['type'] == 'reset': flags, submitted, comment, categories = {}, None, '', {}
     return flags, submitted, comment, categories
 
@@ -385,18 +391,133 @@ def send_prepared(msg):
             headers={'Authorization': 'Bearer ' + os.environ['RESEND_API_KEY'], 'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=30) as r: r.read()
         return 'sent-resend'
-    fn = os.path.join(OUTBOX, datetime.now(TZ).strftime('%Y%m%d-%H%M%S-') + hashlib.sha1(str(msg['Subject'] or '').encode()).hexdigest()[:6] + '.eml')
+    raw = bytes(msg)
+    fn = os.path.join(OUTBOX, datetime.now(TZ).strftime('%Y%m%d-%H%M%S-') + hashlib.sha1(raw).hexdigest()[:8] + '.eml')
     with open(fn, 'wb') as fh:
-        fh.write(bytes(msg))
+        fh.write(raw)
     return 'dryrun:' + fn
 
 def send_email(subj, body, text):
+    """The per-employee record. Only RECORD_TO, never a copy to Chris or anyone else."""
     to = [x.strip() for x in RECORD_TO.split(',') if x.strip()]
-    cc = [x.strip() for x in RECORD_CC.split(',') if x.strip()]
     msg = EmailMessage(); msg['Subject'] = subj; msg['From'] = MAIL_FROM; msg['To'] = ', '.join(to)
-    if cc: msg['Cc'] = ', '.join(cc)
     msg.set_content(text); msg.add_alternative(body, subtype='html')
     return send_prepared(msg)
+
+def all_submitted_notice(stmt):
+    found = None
+    for r in read_log():
+        if r.get('type') == 'all_submitted_notice' and r.get('stmt') == stmt:
+            found = r
+    return found
+
+def everyone_submitted(doc):
+    people = doc.get('employees') or []
+    if not people:
+        return False
+    for emp in people:
+        _flags, submitted, _comment, _categories = state(doc['stmt'], emp['id'])
+        if not submitted:
+            return False
+    return True
+
+def owner_summary_bodies(built):
+    """Category totals for Chris and Meghan. No per-charge or per-person detail."""
+    lines = [f"All cardholders have submitted {built['period']['folder_label']}.",
+             f"Statement close date: {built['period']['close_date']}.", '']
+    for name, cents in built['categories']:
+        lines.append(f"{name}: {summary.format_money(cents)}")
+    lines += ['',
+              f"Grand total: {summary.format_money(built['summary_cents'])}",
+              f"Statement total: {summary.format_money(built['statement_cents'])}"]
+    if built['difference_cents'] != 0:
+        lines.append(
+            f"Summary total {summary.format_money(built['summary_cents'])} does not equal the statement total "
+            f"{summary.format_money(built['statement_cents'])}. "
+            f"Difference: {summary.format_money(built['difference_cents'])}.")
+    link = f"{PUBLIC_BASE}/admin/summary/{built['stmt']}"
+    lines += ['', link]
+    text = '\n'.join(lines) + '\n'
+    html_rows = ''.join(
+        f"<tr><td>{html.escape(name)}</td><td style='text-align:right'>{summary.format_money(cents)}</td></tr>"
+        for name, cents in built['categories'])
+    warning = ''
+    if built['difference_cents'] != 0:
+        warning = ("<p style='color:#c62828'><b>"
+                   f"Summary total {summary.format_money(built['summary_cents'])} does not equal the statement total "
+                   f"{summary.format_money(built['statement_cents'])}. "
+                   f"Difference: {summary.format_money(built['difference_cents'])}.</b></p>")
+    body = ("<div style='font-family:Arial,Helvetica,sans-serif'>"
+            f"<p>All cardholders have submitted {html.escape(built['period']['folder_label'])}.</p>"
+            f"<p>Statement close date: {html.escape(built['period']['close_date'])}.</p>"
+            f"<table border='1' cellspacing='0' cellpadding='6'><tr><th>Category</th><th>Amount</th></tr>{html_rows}"
+            f"<tr><td><b>Grand total</b></td><td style='text-align:right'><b>{summary.format_money(built['summary_cents'])}</b></td></tr>"
+            f"<tr><td>Statement total</td><td style='text-align:right'>{summary.format_money(built['statement_cents'])}</td></tr></table>"
+            f"{warning}<p><a href='{html.escape(link)}'>{html.escape(link)}</a></p></div>")
+    return text, body
+
+def owner_summary_email(built, addr):
+    text, html_body = owner_summary_bodies(built)
+    msg = EmailMessage()
+    msg['Subject'] = f"All submitted: {built['period']['folder_label']}"
+    msg['From'] = MAIL_FROM
+    msg['To'] = addr
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype='html')
+    return msg
+
+def maybe_send_all_submitted(doc):
+    """One email to Chris and one to Meghan, once per statement, after the last cardholder is in."""
+    if not everyone_submitted(doc) or all_submitted_notice(doc['stmt']):
+        return
+    built = summary.build_summary(doc, state)
+    try:
+        statuses = [send_prepared(owner_summary_email(built, addr)) for addr in (CHRIS_EMAIL, MEGHAN_EMAIL)]
+    except Exception as ex:
+        append({'type': 'email', 'stmt': doc['stmt'], 'ts': now(), 'to': CHRIS_EMAIL,
+                'status': f'error: {type(ex).__name__}: {ex}'})
+        return
+    append({'type': 'all_submitted_notice', 'stmt': doc['stmt'], 'ts': now(),
+            'to': [CHRIS_EMAIL, MEGHAN_EMAIL], 'email_status': statuses})
+
+def pending_people(doc):
+    missing = []
+    submitted = 0
+    for emp in doc.get('employees') or []:
+        _flags, sub, _comment, _categories = state(doc['stmt'], emp['id'])
+        if sub:
+            submitted += 1
+        else:
+            missing.append(emp)
+    return missing, submitted
+
+def pending_reminder_email(doc, missing):
+    period = summary.statement_period(doc)
+    month = period['month_label']
+    text_lines = [f"These cardholders have not submitted {month}.", '']
+    html_parts = [f"<p>These cardholders have not submitted {html.escape(month)}.</p>"]
+    if not missing:
+        text_lines.append('Everyone has submitted.')
+        html_parts.append('<p>Everyone has submitted.</p>')
+    for emp in missing:
+        name = emp.get('name') or emp['id']
+        url = f"{PUBLIC_BASE}/admin/summary/{doc['stmt']}/approve/{emp['id']}"
+        text_lines.append(name)
+        text_lines.append(f"Approve {name}'s charges: {url}")
+        text_lines.append(f"Or reply APPROVE {name} (or APPROVE ALL).")
+        text_lines.append('')
+        html_parts.append(
+            f"<p>{html.escape(name)}<br>"
+            f"<a href='{html.escape(url, quote=True)}'>Approve {html.escape(name)}'s charges</a><br>"
+            f"Or reply APPROVE {html.escape(name)} (or APPROVE ALL).</p>")
+    msg = EmailMessage()
+    msg['Subject'] = f"Amex {month}: not yet submitted"
+    msg['From'] = MAIL_FROM
+    msg['To'] = CHRIS_EMAIL
+    msg['Reply-To'] = RECORD_ADDRESS
+    msg.set_content('\n'.join(text_lines).rstrip() + '\n')
+    msg.add_alternative(''.join(html_parts), subtype='html')
+    return msg
 
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
@@ -731,7 +852,8 @@ def submit(token):
           except Exception as ex:
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
-                  'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
+                  'to': RECORD_TO, 'cc': '', 'status': status})
+          maybe_send_all_submitted(doc)
     return redirect(f'/v/{token}', 303)
 
 @app.post('/v/<token>/comment')
@@ -805,7 +927,7 @@ def admin():
             rows.append(f"<tr><td>{stmt}</td><td>{esc(e['name'])}</td><td>{st}</td><td>{len(sub['flagged']) if sub else len(flags)}</td>"
                         f"<td>{len(e['rows'])}</td><td>{money(sum(r['amount'] for r in e['rows']))}</td><td style='font-size:12px'>{esc(link)}</td></tr>")
     return (f"<!doctype html><meta charset='utf-8'><title>Amex admin</title><body style='font-family:Arial;padding:16px'>"
-            f"<h2>Amex verification - status</h2><p>Record email: {esc(EMAIL_MODE)} to {esc(RECORD_TO)}{' cc ' + esc(RECORD_CC) if RECORD_CC else ''}. "
+            f"<h2>Amex verification - status</h2><p>Record email: {esc(EMAIL_MODE)} to {esc(RECORD_TO)}. "
             f"<a href='/admin/log.csv'>Download full log (CSV)</a> · <a href='/admin/summary'>Monthly summary</a></p>"
             f"<table border='1' cellpadding='6' cellspacing='0'><tr><th>Statement</th><th>Employee</th><th>Status</th><th>Flagged</th><th>Charges</th><th>Total</th><th>Link</th></tr>{''.join(rows)}</table>")
 
@@ -892,7 +1014,9 @@ def render_summary_page(built, actor, qb):
              f"<p>Month folder: {esc(period['folder_label'])}.</p>",
              "<h2>Cardholders</h2><table><tr><th>Employee</th><th>Status</th><th>Total</th></tr>"]
     for person in built['people']:
-        if person['submitted']:
+        if person['submitted'] and person.get('record_type') == 'admin_approve':
+            status = 'Approved by Chris ' + esc(nice(person['ts'])) if person['ts'] else 'Approved by Chris'
+        elif person['submitted']:
             status = 'Submitted ' + esc(nice(person['ts'])) if person['ts'] else 'Submitted'
         else:
             status = "<b style='color:#c62828'>Not submitted</b>"
@@ -1044,6 +1168,92 @@ def summary_qb_submit(stmt):
                 'categories': payload['categories'], 'to': RECORD_ADDRESS, 'email_status': status,
                 'files': folder})
     return redirect(f'/admin/summary/{stmt}', 303)
+
+def require_chris():
+    who = need_admin()
+    if who != 'Chris':
+        abort(Response('Chris only', 403))
+    return who
+
+def _employee(doc, emp_id):
+    return next((emp for emp in (doc or {}).get('employees') or [] if emp.get('id') == emp_id), None)
+
+@app.get('/admin/pending.json')
+def admin_pending():
+    """Who has not submitted. Names and ids only. Newest statement unless ?stmt= is set."""
+    need_admin()
+    statements = load_statements()
+    stmt = (request.args.get('stmt') or '').strip()
+    if not stmt:
+        if not statements:
+            abort(404)
+        stmt = max(statements)
+    doc = statements.get(stmt)
+    if not doc:
+        abort(404)
+    missing, submitted = pending_people(doc)
+    return jsonify(statement=stmt, month=summary.statement_period(doc)['month_label'],
+                   not_submitted=[{'name': emp.get('name') or emp['id'], 'id': emp['id']} for emp in missing],
+                   submitted=submitted, total=len(doc.get('employees') or []))
+
+@app.get('/admin/summary/<stmt>/approve/<emp_id>')
+def approve_confirm(stmt, emp_id):
+    require_chris()
+    doc = load_statements().get(stmt)
+    emp = _employee(doc, emp_id)
+    if not emp:
+        abort(404)
+    if qb_record(stmt):
+        return Response('This month was sent for posting', 409)
+    _flags, sub, _comment, _categories = state(stmt, emp_id)
+    if sub:
+        return Response('Already submitted', 409)
+    esc = html.escape
+    name = emp.get('name') or emp_id
+    return (f"<!doctype html><meta charset='utf-8'><title>Approve {esc(name)}</title>"
+            f"<body style='font-family:Arial;padding:16px'><h1>Approve {esc(name)}'s charges</h1>"
+            f"<p>This approves every charge as submitted. No email goes to {esc(name)}.</p>"
+            f"<form method='post' action='/admin/summary/{esc(stmt)}/approve/{esc(emp_id)}'>"
+            f"<button type='submit' id='approve'>Approve {esc(name)}'s charges</button></form>")
+
+@app.post('/admin/summary/<stmt>/approve/<emp_id>')
+def admin_approve(stmt, emp_id):
+    """Chris approves one cardholder as-is. No email to that employee."""
+    require_chris()
+    doc = load_statements().get(stmt)
+    emp = _employee(doc, emp_id)
+    if not emp:
+        abort(404)
+    with SUBMIT_LOCK:
+        if qb_record(stmt):
+            return jsonify(error='month locked'), 409
+        _flags, sub, _comment, _categories = state(stmt, emp_id)
+        if sub:
+            return jsonify(error='already submitted'), 409
+        rows = sorted_rows(emp.get('rows') or [])
+        rec = {'type': 'admin_approve', 'stmt': stmt, 'emp_id': emp_id,
+               'emp': emp.get('name') or emp_id, 'by': 'Chris', 'note': APPROVAL_NOTE,
+               'flagged': [], 'approved': [r['id'] for r in rows], 'flagged_total': 0,
+               'approved_total': round(sum(float(r['amount']) for r in rows), 2), 'comment': '', **meta()}
+        append(rec)
+        maybe_send_all_submitted(doc)
+    return redirect(f'/admin/summary/{stmt}', 303)
+
+@app.post('/admin/summary/<stmt>/pending-email')
+def admin_pending_email(stmt):
+    """Ask Chris who is still out. Littledude reads any APPROVE reply and calls the approve endpoint."""
+    need_admin()
+    doc = load_statements().get(stmt)
+    if not doc:
+        abort(404)
+    missing, _submitted = pending_people(doc)
+    try:
+        status = send_prepared(pending_reminder_email(doc, missing))
+    except Exception as ex:
+        return Response(f'The reminder email failed: {type(ex).__name__}: {ex}', 502)
+    append({'type': 'pending_email', 'stmt': stmt, 'ts': now(), 'to': CHRIS_EMAIL,
+            'pending': [emp['id'] for emp in missing], 'email_status': status})
+    return jsonify(ok=True, to=CHRIS_EMAIL, pending=[emp['id'] for emp in missing])
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '10000')))

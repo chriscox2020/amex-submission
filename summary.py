@@ -89,6 +89,7 @@ def build_summary(doc, state_fn):
             'id': emp['id'],
             'name': emp.get('name') or emp['id'],
             'submitted': submitted is not None,
+            'record_type': (submitted or {}).get('type') or '',
             'ts': (submitted or {}).get('ts') or '',
             'comment': (submitted or {}).get('comment') or comment or '',
             'total_cents': own,
