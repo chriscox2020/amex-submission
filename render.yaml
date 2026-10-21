@@ -24,7 +24,7 @@ services:
         value: https://amex.coxresearch.com
       - key: TOKEN_SECRET          # signs the per-employee links; never change after links go out
         generateValue: true
-      - key: ADMIN_PASSWORD        # Chris-only /admin and /admin/log.csv
+      - key: ADMIN_PASSWORD        # Chris or Meghan: /admin, log, links, and summary
         generateValue: true
       - key: EMAIL_MODE            # dryrun until the mail credential is in, then smtp (or resend)
         value: dryrun

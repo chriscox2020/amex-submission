@@ -8,13 +8,16 @@ One page per employee per statement, reached by an unguessable token link.
            persistent disk, and emails a record to RECORD_TO automatically.
            Each flagged line is charge date, merchant, amount, flagged date,
            reference (or "ref pending"), then the note.
-Charge review stays in this app. Submitting writes the log and the record email only.
+Charge review stays in this app. An employee's Submit writes the log and the record email only.
+Chris and Meghan have a separate summary page. Sending that summary emails Littledude.
+This server does not call QuickBooks or Dropbox.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
 from datetime import datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 from flask import Flask, request, abort, Response, jsonify, redirect
+import summary
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get('DATA_DIR', '/var/data')
@@ -163,6 +166,21 @@ def state(stmt, emp_id):
         elif r['type'] == 'reset': flags, submitted, comment, categories = {}, None, '', {}
     return flags, submitted, comment, categories
 
+def qb_record(stmt):
+    """The month lock written when Chris or Meghan send the summary for posting."""
+    found = None
+    for r in read_log():
+        if r.get('type') == 'qb_submit' and r.get('stmt') == stmt:
+            found = r
+    return found
+
+def month_locked_response(stmt):
+    if not qb_record(stmt):
+        return None
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(error='month locked'), 409
+    return Response('This month was sent for posting', 409)
+
 # ---------- email ----------
 def money(a): return f'${float(a):,.2f}'
 
@@ -303,7 +321,10 @@ def flag_comment_line(comment):
     return 'Flagged charges: ' + comment
 
 def record_email(doc, e, flagged, approved, ts, comment=''):
-    subj = f"Amex verification SUBMITTED: {e['name']} - {doc['label']} - {len(flagged)} flagged"
+    # The month folder name lets Littledude file this record. This email does not
+    # upload anywhere and does not call QuickBooks or Dropbox.
+    folder = summary.statement_period(doc)['folder_label']
+    subj = f"Amex verification SUBMITTED: {e['name']} - {folder} - {len(flagged)} flagged"
     def tbl(rows):
         if not rows: return '<p><i>None</i></p>'
         t = ''.join(f"<tr><td style='padding:4px 8px'>{r['date']}</td><td style='padding:4px 8px'>{html.escape(r['category'])}</td>"
@@ -329,12 +350,8 @@ def record_email(doc, e, flagged, approved, ts, comment=''):
             f"Approved ({len(approved)}, {money(at)}).\n")
     return subj, body, text
 
-def send_email(subj, body, text):
-    to = [x.strip() for x in RECORD_TO.split(',') if x.strip()]
-    cc = [x.strip() for x in RECORD_CC.split(',') if x.strip()]
-    msg = EmailMessage(); msg['Subject'] = subj; msg['From'] = MAIL_FROM; msg['To'] = ', '.join(to)
-    if cc: msg['Cc'] = ', '.join(cc)
-    msg.set_content(text); msg.add_alternative(body, subtype='html')
+def send_prepared(msg):
+    """Deliver an already built message. Dry-run writes it to the outbox and sends nothing."""
     if EMAIL_MODE == 'smtp':
         host = os.environ.get('SMTP_HOST', 'smtp.office365.com'); port = int(os.environ.get('SMTP_PORT', '587'))
         with smtplib.SMTP(host, port, timeout=30) as s:
@@ -344,13 +361,42 @@ def send_email(subj, body, text):
         return 'sent-smtp'
     if EMAIL_MODE == 'resend':
         import urllib.request
+        text = html_body = None
+        attachments = []
+        for part in msg.walk():
+            if part.get_content_maintype() == 'multipart':
+                continue
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b''
+            if filename:
+                attachments.append({'filename': filename, 'content': base64.b64encode(payload).decode()})
+            elif part.get_content_type() == 'text/plain' and text is None:
+                text = payload.decode('utf-8', 'replace')
+            elif part.get_content_type() == 'text/html' and html_body is None:
+                html_body = payload.decode('utf-8', 'replace')
+        to = [x.strip() for x in str(msg['To'] or '').split(',') if x.strip()]
+        cc = [x.strip() for x in str(msg['Cc'] or '').split(',') if x.strip()]
+        data = {'from': MAIL_FROM, 'to': to, 'cc': cc, 'subject': str(msg['Subject'] or ''),
+                'html': html_body or '', 'text': text or ''}
+        if attachments:
+            data['attachments'] = attachments
         req = urllib.request.Request('https://api.resend.com/emails', method='POST',
-            data=json.dumps({'from': MAIL_FROM, 'to': to, 'cc': cc, 'subject': subj, 'html': body, 'text': text}).encode(),
+            data=json.dumps(data).encode(),
             headers={'Authorization': 'Bearer ' + os.environ['RESEND_API_KEY'], 'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=30) as r: r.read()
         return 'sent-resend'
-    fn = os.path.join(OUTBOX, datetime.now(TZ).strftime('%Y%m%d-%H%M%S-') + hashlib.sha1(subj.encode()).hexdigest()[:6] + '.eml')
-    open(fn, 'wb').write(bytes(msg)); return 'dryrun:' + fn
+    fn = os.path.join(OUTBOX, datetime.now(TZ).strftime('%Y%m%d-%H%M%S-') + hashlib.sha1(str(msg['Subject'] or '').encode()).hexdigest()[:6] + '.eml')
+    with open(fn, 'wb') as fh:
+        fh.write(bytes(msg))
+    return 'dryrun:' + fn
+
+def send_email(subj, body, text):
+    to = [x.strip() for x in RECORD_TO.split(',') if x.strip()]
+    cc = [x.strip() for x in RECORD_CC.split(',') if x.strip()]
+    msg = EmailMessage(); msg['Subject'] = subj; msg['From'] = MAIL_FROM; msg['To'] = ', '.join(to)
+    if cc: msg['Cc'] = ', '.join(cc)
+    msg.set_content(text); msg.add_alternative(body, subtype='html')
+    return send_prepared(msg)
 
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
@@ -509,8 +555,12 @@ def popup_html():
             "<button type='button' class='sv' id='popsave'>Save</button></div>")
 
 def render(doc, e, token, flags, submitted, comment='', categories=None):
+    """One cardholder only. Print uses this same HTML, so it cannot include anyone else."""
     esc = html.escape
-    rows = sorted_rows(e['rows'])
+    others = [p for p in (doc.get('employees') or []) if p.get('id') != e.get('id')]
+    if others:
+        raise RuntimeError('employee page was given another cardholder')
+    rows = sorted_rows(e.get('rows') or [])
     locked = submitted is not None
     categories = categories or {}
     if submitted is not None and 'comment' in submitted:
@@ -522,7 +572,8 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
     tot_cr = sum(float(r['amount']) for r in credits)
     credit_cell = f"<span class='crn'>{money_signed(tot_cr)}</span>" if credits else 'None'
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head><body>"
+             f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head>"
+             f"<body data-employee='{esc(e['id'])}'>"
              f"<div class='banner'>American Express Charges</div><h1>{esc(e['name'])}</h1><div class='sheet'>"]
     if locked:
         listed = f"<ul id='flaglist'>{lis}</ul>" if lis else ''
@@ -611,7 +662,10 @@ def view(token):
     if not doc: abort(404)
     flags, sub, comment, categories = state(doc['stmt'], e['id'])
     append({'type': 'open', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta()})
-    page = render(doc, e, token, flags, sub, comment, categories)
+    # The token selects one employee. Drop every other cardholder before rendering or printing.
+    solo = {k: v for k, v in doc.items() if k != 'employees'}
+    solo['employees'] = [e]
+    page = render(solo, e, token, flags, sub, comment, categories)
     act = request.args.get('do', ''); row = request.args.get('row', '')
     if not sub and act == 'flag' and row.isdigit() and int(row) not in flags:
         js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
@@ -631,6 +685,8 @@ def flag(token, row):
     if not r: abort(404)
     if is_credit_row(r):
         return jsonify(error='credit'), 400
+    locked = month_locked_response(doc['stmt'])
+    if locked: return locked
     flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted', flagged=row in flags, count=len(flags)), 409
     on = row not in flags
@@ -653,6 +709,10 @@ def submit(token):
     if not doc: abort(404)
     with SUBMIT_LOCK:
       flags, sub, stored_comment, categories = state(doc['stmt'], e['id'])
+      # Employee Submit only approves rows and emails the verification record.
+      # It does not build the monthly summary or send anything for posting.
+      if qb_record(doc['stmt']) and not sub:
+          return Response('This month was sent for posting', 409)
       if not sub:
           rows = sorted_rows(e['rows'])
           flagged = attach_flag_meta([r for r in rows if r['id'] in flags], flags)
@@ -678,6 +738,8 @@ def submit(token):
 def set_comment(token):
     doc, e = resolve(token)
     if not doc: abort(404)
+    locked = month_locked_response(doc['stmt'])
+    if locked: return locked
     _flags, sub, stored, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted'), 409
     incoming = posted_field('comment')
@@ -697,6 +759,8 @@ def set_category(token, row):
     if not r: abort(404)
     if is_credit_row(r):
         return jsonify(error='credit'), 400
+    locked = month_locked_response(doc['stmt'])
+    if locked: return locked
     _flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted'), 409
     raw = posted_field('category')
@@ -709,11 +773,25 @@ def set_category(token, row):
         return jsonify(ok=True, row=row, category=choice)
     return redirect(f'/v/{token}', 303)
 
-# ---------- Chris-only admin ----------
+# ---------- Chris and Meghan admin ----------
 def need_admin():
+    """Every /admin route. Username must be Chris or Meghan, and the password is ADMIN_PASSWORD.
+
+    An employee token is not a password and cannot open these routes.
+    """
     a = request.authorization
     if not ADMIN_PASSWORD or not a or not hmac.compare_digest(a.password or '', ADMIN_PASSWORD):
         abort(Response('Login required', 401, {'WWW-Authenticate': 'Basic realm="Cox Amex admin"'}))
+    who = SUMMARY_ACTORS.get((a.username or '').strip().casefold())
+    if not who:
+        abort(Response('Chris or Meghan only', 403))
+    return who
+
+@app.before_request
+def guard_admin():
+    path = request.path or ''
+    if path == '/admin' or path.startswith('/admin/'):
+        need_admin()
 
 @app.get('/admin')
 def admin():
@@ -728,14 +806,14 @@ def admin():
                         f"<td>{len(e['rows'])}</td><td>{money(sum(r['amount'] for r in e['rows']))}</td><td style='font-size:12px'>{esc(link)}</td></tr>")
     return (f"<!doctype html><meta charset='utf-8'><title>Amex admin</title><body style='font-family:Arial;padding:16px'>"
             f"<h2>Amex verification - status</h2><p>Record email: {esc(EMAIL_MODE)} to {esc(RECORD_TO)}{' cc ' + esc(RECORD_CC) if RECORD_CC else ''}. "
-            f"<a href='/admin/log.csv'>Download full log (CSV)</a></p>"
+            f"<a href='/admin/log.csv'>Download full log (CSV)</a> · <a href='/admin/summary'>Monthly summary</a></p>"
             f"<table border='1' cellpadding='6' cellspacing='0'><tr><th>Statement</th><th>Employee</th><th>Status</th><th>Flagged</th><th>Charges</th><th>Total</th><th>Link</th></tr>{''.join(rows)}</table>")
 
 @app.get('/admin/log.csv')
 def admin_csv():
     need_admin()
     cols = ['ts', 'type', 'stmt', 'emp_id', 'emp', 'row', 'date', 'category', 'company', 'amount',
-            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua', 'note', 'comment']
+            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua', 'note', 'comment', 'by']
     buf = io.StringIO(); w = csv.DictWriter(buf, cols, extrasaction='ignore'); w.writeheader()
     for r in read_log():
         row = {}
@@ -779,8 +857,193 @@ def admin_upload():
 @app.post('/admin/reset/<stmt>/<emp_id>')
 def admin_reset(stmt, emp_id):
     """Reopen one employee's page (clears flags + submission; history stays in the log)."""
-    need_admin(); append({'type': 'reset', 'stmt': stmt, 'emp_id': emp_id, 'ts': now()})
+    need_admin()
+    if qb_record(stmt):
+        return jsonify(error='month locked'), 409
+    append({'type': 'reset', 'stmt': stmt, 'emp_id': emp_id, 'ts': now()})
     return jsonify(ok=True)
+
+# ---------- monthly summary (Chris and Meghan only) ----------
+SUMMARY_ACTORS = {'chris': 'Chris', 'meghan': 'Meghan'}
+
+def summary_actor():
+    """Same Chris/Meghan password as /admin. The username is what a QB press records."""
+    return need_admin()
+
+def summary_folder(label):
+    """One path segment under /var/data/summaries. Slashes cannot escape that directory."""
+    segment = str(label or 'unknown').replace('/', '-').replace('\\', '-').strip() or 'unknown'
+    return os.path.join(DATA_DIR, 'summaries', segment)
+
+def render_summary_page(built, actor, qb):
+    esc = html.escape
+    period = built['period']
+    stmt = built['stmt']
+    parts = ["<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+             f"<title>{esc(period['month_label'])} American Express summary</title>",
+             "<style>body{font-family:Arial,Helvetica,sans-serif;margin:0;color:#222}h1{font-size:28px;margin:16px 18px 8px}",
+             ".sheet{margin:0 18px 40px}table{border-collapse:collapse;width:100%;max-width:760px;margin:12px 0}",
+             "td,th{border:1px solid #999;padding:8px 10px;text-align:left}th{background:#e8e8e8}.n{text-align:right}",
+             ".warn{color:#c62828;font-weight:bold}.sent{color:#2e7d32;font-weight:bold;font-size:20px}",
+             ".qb{margin-top:16px;font-size:18px;padding:12px 18px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}",
+             ".qb:disabled{background:#9aa;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}</style></head><body>",
+             f"<h1>{esc(period['month_label'])} American Express</h1><div class='sheet'>",
+             f"<p>Signed in as {esc(actor)}. Statement close date: {esc(period['close_date'])}.</p>",
+             f"<p>Month folder: {esc(period['folder_label'])}.</p>",
+             "<h2>Cardholders</h2><table><tr><th>Employee</th><th>Status</th><th>Total</th></tr>"]
+    for person in built['people']:
+        if person['submitted']:
+            status = 'Submitted ' + esc(nice(person['ts'])) if person['ts'] else 'Submitted'
+        else:
+            status = "<b style='color:#c62828'>Not submitted</b>"
+        parts.append(f"<tr><td>{esc(person['name'])}</td><td>{status}</td><td class='n'>{summary.format_money(person['total_cents'])}</td></tr>")
+    parts.append("</table><h2>Categories</h2><table><tr><th>Category</th><th>Amount</th></tr>")
+    for name, cents in built['categories']:
+        parts.append(f"<tr><td>{esc(name)}</td><td class='n'>{summary.format_money(cents)}</td></tr>")
+    parts.append(f"<tr><td><b>Grand total</b></td><td class='n'><b>{summary.format_money(built['summary_cents'])}</b></td></tr></table>")
+    parts.append(f"<p>Statement total: {summary.format_money(built['statement_cents'])}.</p>")
+    parts.append(f"<p><a class='dl' href='/admin/summary/{esc(stmt)}/summary.pdf'>Download PDF</a>"
+                 f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.csv'>Download CSV</a>"
+                 f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.xlsx'>Download XLSX</a></p>")
+    if qb:
+        when = esc(nice(qb['ts'])) if qb.get('ts') else ''
+        parts.append(f"<p class='sent' id='sent'>Sent for posting</p><p id='sent-when'>{when} by {esc(qb.get('by') or '')}.</p>")
+    else:
+        if not built['ready']:
+            parts.append("<p class='warn' id='summary-warning'>Summary total "
+                         f"{summary.format_money(built['summary_cents'])} does not equal the statement total "
+                         f"{summary.format_money(built['statement_cents'])}. "
+                         f"Difference: {summary.format_money(built['difference_cents'])}."
+                         + ("" if built['everyone_submitted'] else " Not everyone has submitted.")
+                         + "</p>")
+            disabled = ' disabled'
+        else:
+            disabled = ''
+        parts.append(f"<form method='post' action='/admin/summary/{esc(stmt)}/qb-submit'>"
+                     f"<button class='qb' type='submit' id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button></form>")
+    parts.append("<p style='color:#555;font-size:14px'>Littledude creates the bill and files the attachments. This server does not.</p></div></body></html>")
+    return ''.join(parts)
+
+def write_summary_files(built):
+    folder = summary_folder(built['period']['folder_label'])
+    sub_dir = os.path.join(folder, 'submissions')
+    os.makedirs(sub_dir, exist_ok=True)
+    files = {
+        summary.summary_filename(built, 'pdf'): summary.build_pdf(built),
+        summary.summary_filename(built, 'xlsx'): summary.build_xlsx(built),
+        summary.summary_filename(built, 'csv'): summary.build_csv(built),
+    }
+    for name, data in files.items():
+        with open(os.path.join(folder, name), 'wb') as fh:
+            fh.write(data)
+    records = []
+    for person in built['people']:
+        if not person['submitted']:
+            continue
+        raw = json.dumps(summary.submission_record(built, person), indent=2).encode()
+        fn = person['id'] + '-submission.json'
+        with open(os.path.join(sub_dir, fn), 'wb') as fh:
+            fh.write(raw)
+        records.append((fn, raw))
+    return folder, records
+
+def qb_email(built, actor):
+    text, html_body = summary.qb_bodies(built, actor)
+    msg = EmailMessage()
+    msg['Subject'] = summary.qb_subject(built)
+    msg['From'] = MAIL_FROM
+    msg['To'] = RECORD_ADDRESS
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype='html')
+    msg.add_attachment(summary.build_pdf(built), maintype='application', subtype='pdf',
+                       filename=summary.summary_filename(built, 'pdf'))
+    msg.add_attachment(summary.build_xlsx(built), maintype='application',
+                       subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                       filename=summary.summary_filename(built, 'xlsx'))
+    for person in built['people']:
+        if not person['submitted']:
+            continue
+        raw = json.dumps(summary.submission_record(built, person), indent=2).encode()
+        msg.add_attachment(raw, maintype='application', subtype='json', filename=person['id'] + '-submission.json')
+    return msg
+
+@app.get('/admin/summary')
+def summary_index():
+    actor = summary_actor()
+    esc = html.escape
+    rows = []
+    for stmt, doc in sorted(load_statements().items(), reverse=True):
+        built = summary.build_summary(doc, state)
+        qb = qb_record(stmt)
+        status = 'Sent for posting' if qb else ('Ready' if built['ready'] else 'Waiting')
+        rows.append(f"<tr><td><a href='/admin/summary/{esc(stmt)}'>{esc(stmt)}</a></td>"
+                    f"<td>{esc(summary.statement_period(doc)['month_label'])}</td><td>{esc(status)}</td></tr>")
+    return (f"<!doctype html><meta charset='utf-8'><title>Monthly summary</title><body style='font-family:Arial;padding:16px'>"
+            f"<h1>Monthly summary</h1><p>Signed in as {esc(actor)}.</p>"
+            f"<table border='1' cellpadding='6' cellspacing='0'><tr><th>Statement</th><th>Month</th><th>Status</th></tr>{''.join(rows)}</table>")
+
+@app.get('/admin/summary/<stmt>')
+def summary_page(stmt):
+    actor = summary_actor()
+    doc = load_statements().get(stmt)
+    if not doc:
+        abort(404)
+    built = summary.build_summary(doc, state)
+    return Response(render_summary_page(built, actor, qb_record(stmt)), headers={'Cache-Control': 'no-store'})
+
+def _summary_download(stmt, kind):
+    summary_actor()
+    doc = load_statements().get(stmt)
+    if not doc:
+        abort(404)
+    built = summary.build_summary(doc, state)
+    if kind == 'pdf':
+        data, mime, ext = summary.build_pdf(built), 'application/pdf', 'pdf'
+    elif kind == 'csv':
+        data, mime, ext = summary.build_csv(built), 'text/csv', 'csv'
+    else:
+        data, mime, ext = summary.build_xlsx(built), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'
+    name = summary.summary_filename(built, ext)
+    return Response(data, mimetype=mime, headers={
+        'Content-Disposition': f'attachment; filename="{name}"', 'Cache-Control': 'no-store'})
+
+@app.get('/admin/summary/<stmt>/summary.pdf')
+def summary_pdf(stmt):
+    return _summary_download(stmt, 'pdf')
+
+@app.get('/admin/summary/<stmt>/summary.csv')
+def summary_csv(stmt):
+    return _summary_download(stmt, 'csv')
+
+@app.get('/admin/summary/<stmt>/summary.xlsx')
+def summary_xlsx(stmt):
+    return _summary_download(stmt, 'xlsx')
+
+@app.post('/admin/summary/<stmt>/qb-submit')
+def summary_qb_submit(stmt):
+    actor = summary_actor()
+    doc = load_statements().get(stmt)
+    if not doc:
+        abort(404)
+    with SUBMIT_LOCK:
+        if qb_record(stmt):
+            return redirect(f'/admin/summary/{stmt}', 303)
+        built = summary.build_summary(doc, state)
+        if not built['ready']:
+            return jsonify(error='not ready', difference=round(built['difference_cents'] / 100, 2)), 409
+        folder, _records = write_summary_files(built)
+        try:
+            status = send_prepared(qb_email(built, actor))
+        except Exception as ex:
+            return Response(f'Summary files were saved but the email failed: {type(ex).__name__}: {ex}', 502)
+        payload = summary.category_payload(built)
+        append({'type': 'qb_submit', 'stmt': stmt, 'by': actor, **meta(),
+                'close_date': built['period']['close_date'], 'month': built['period']['month_label'],
+                'folder': built['period']['folder_label'],
+                'summary_total': payload['grand_total'], 'statement_total': payload['statement_total'],
+                'categories': payload['categories'], 'to': RECORD_ADDRESS, 'email_status': status,
+                'files': folder})
+    return redirect(f'/admin/summary/{stmt}', 303)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '10000')))

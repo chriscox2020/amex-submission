@@ -14,24 +14,39 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   `RECORD_TO` = **littledude@mail.grokbot.com** (a leftover `littledude@coxresearch.com` value is rewritten to this address; optional `RECORD_CC`).
   Each flagged line is charge date, merchant, amount, flagged date, reference number (or "ref pending"), then the note. The overall comment follows those lines as `Flagged charges: <text>`. Print hides the buttons and popups. Nothing here posts to QuickBooks or American Express.
 * **Alice E Cox**: her review link and verification email always go to **chris@coxresearch.com**, never alice@. That is hardcoded and is not changed by an uploaded email address.
-* Log: `/var/data/log.jsonl` (append-only; opens, flags, unflags, submits, email results).
-* Chris-only admin (HTTP login, any username + `ADMIN_PASSWORD`):
+* Log: `/var/data/log.jsonl` (append-only; opens, flags, unflags, submits, email results, and `qb_submit`).
+* Each employee link shows only that employee's charges, notes, and submission. Print uses that same page. The token is an unguessable HMAC, and there is no list of employees or tokens.
+* Chris and Meghan admin (HTTP login, username `Chris` or `Meghan` + `ADMIN_PASSWORD`):
   `/admin` (who has / hasn't submitted + each employee's link), `/admin/log.csv`, `/admin/links.json`,
   `POST /admin/upload` (add a month), `POST /admin/reset/<stmt>/<emp-id>` (reopen a page).
+  An employee token cannot open any of these.
+* **Monthly summary** for Chris and Meghan only: `/admin/summary` and `/admin/summary/<stmt>`
+  (for example `/admin/summary/2026-09-22`). Same username and `ADMIN_PASSWORD`. The username is what a QuickBooks press records.
+  The page totals every submitted cardholder's charges by their final category (an edit wins over the statement default), lists every category and the grand total, and shows who has and has not submitted.
+  Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`.
+  The month folder name is `American Express charges <Month> <YYYY>` (for example `American Express charges October 2026`).
+  **Submit to QuickBooks for Pay** is on this page only. It stays disabled until every cardholder has submitted and the summary total equals the statement total; otherwise the page shows a red warning with the difference.
+  Pressing it locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`.
+  The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`).
+  The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`.
+  Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.
+  Littledude creates the bill and files the attachments. This server stores no QuickBooks or Dropbox credentials and does not call either service.
+  After the month is locked, flag, category, comment, submit, and admin reset return 409.
 * The email builder (`tools/make_email.py`) puts only "Open my charges" links in the email, never flag/submit links,
   because Outlook Safe Links and scanners auto-open links and would create fake flags.
 
 ## Files
 | Path | Purpose |
 |---|---|
-| `app.py` | Flask app (page, flag, submit, email, log, admin) |
+| `app.py` | Flask app (page, flag, submit, email, log, admin, monthly summary) |
+| `summary.py` | Category totals, PDF, and spreadsheet. No outside service calls |
 | `requirements.txt` | Flask, gunicorn, tzdata |
 | `render.yaml` | Blueprint: Starter web service + 1 GB disk at /var/data + env vars |
 | `tools/seed_sep22.py` | Builds `statements/2026-09-22.json` from the approved v5 chart (73 charges, $17,024.09) |
 | `tools/load_csv.py` | Generic monthly loader: any employee, any month (CSV date,category,company,amount) |
 | `tools/make_email.py` | v7 email builder → `out/<stmt>/<emp>.html` with links to amex.coxresearch.com (builds only, sends nothing) |
 | `tools/render_deploy.sh` | The Render API calls (owner, create, env, deploy, domain, verify, logs, upload) |
-| `tests/local_test.sh`, `tests/browser_click_test.py` | Local end-to-end tests (dry-run email) |
+| `tests/local_test.sh`, `tests/browser_click_test.py`, `tests/test_flag_note.py`, `tests/test_summary.py` | Local end-to-end tests (dry-run email) |
 
 `statements/*.json` is git-ignored. The Sep 22, 2026 test statement is the exception, shipped at `statements/bundled/2026-09-22.json` so this deploy serves Chris Cox (72 charges, $17,048.40, AutoZone credit -$24.31, net $17,024.09) and Alice E Cox (9 charges, $480.62). A disk copy wins only when its `bundle_rev` is higher. `/admin/upload` sets a higher `bundle_rev`, so a later upload still replaces it.
 

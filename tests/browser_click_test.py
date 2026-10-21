@@ -3,7 +3,7 @@ import base64, json, os, shutil, urllib.request
 from playwright.sync_api import sync_playwright
 
 B = 'http://127.0.0.1:10077'
-auth = {'Authorization': 'Basic ' + base64.b64encode(b'x:local-admin').decode()}
+auth = {'Authorization': 'Basic ' + base64.b64encode(b'Chris:local-admin').decode()}
 links = json.load(urllib.request.urlopen(urllib.request.Request(B + '/admin/links.json', headers=auth)))['2026-09-22']
 assert links['alice-cox']['email'] == 'chris@coxresearch.com'
 url = links['chris-cox']['url']

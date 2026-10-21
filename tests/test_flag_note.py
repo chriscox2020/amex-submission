@@ -110,6 +110,9 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn("button,.pop,.dd{display:none!important}", page)
         self.assertIn(f"/v/{self.token}/flag/1", page)
         self.assertNotIn('Note:', page)
+        self.assertNotIn('Submit to QuickBooks for Pay', page)
+        self.assertNotIn('/qb-submit', page)
+        self.assertNotIn("id='qb-submit'", page)
         low = page.lower()
         self.assertNotIn('dry run', low)
         self.assertNotIn('preview', low)
@@ -193,6 +196,8 @@ class FlagNoteTest(unittest.TestCase):
                 text = part.get_payload(decode=True).decode()
             elif part.get_content_type() == 'text/html':
                 html_body = part.get_payload(decode=True).decode()
+        self.assertEqual(''.join(str(msg['Subject']).splitlines()),
+                         'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 3 flagged')
         self.assertEqual(msg['To'], 'littledude@mail.grokbot.com')
         self.assertEqual(app.RECORD_TO, 'littledude@mail.grokbot.com')
         self.assertEqual(msg['Cc'], 'chris@coxresearch.com')
@@ -258,7 +263,7 @@ class FlagNoteTest(unittest.TestCase):
         self.flag(1, nasty)
         raw = self.flags()[-1]['note']
         self.assertEqual(raw, nasty)
-        csv_body = self.client.get('/admin/log.csv', auth=('x', 'local-admin')).get_data(as_text=True)
+        csv_body = self.client.get('/admin/log.csv', auth=('Chris', 'local-admin')).get_data(as_text=True)
         parsed = list(csv.DictReader(io.StringIO(csv_body)))
         self.assertEqual(parsed[0]['note'], "'" + nasty)
         self.assertTrue(parsed[0]['note'].startswith("'"))
@@ -320,9 +325,12 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.normalize_record_to('littledude@coxresearch.com'), 'littledude@mail.grokbot.com')
         self.assertEqual(app.normalize_record_to(''), 'littledude@mail.grokbot.com')
         self.assertEqual(app.normalize_record_to('other@example.com'), 'other@example.com')
-        src = (ROOT / 'app.py').read_text().lower()
-        for banned in ('quickbooks', 'intuit.com', 'americanexpress.com', 'api.amex'):
+        src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()).lower()
+        for banned in ('intuit.com', 'americanexpress.com', 'api.amex', 'api.dropbox',
+                       'dropbox_token', 'dropbox_app_secret', 'quickbooks_client', 'quickbooks_secret'):
             self.assertNotIn(banned, src)
+        self.assertNotIn('Submit to QuickBooks for Pay', self.page())
+        self.assertNotIn('/qb-submit', self.page())
 
         doc = {
             'stmt': '2026-11-01',
