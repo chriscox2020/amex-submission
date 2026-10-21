@@ -14,8 +14,12 @@ T=${LINK##*/}; echo "token link: $LINK"
 echo "bad token -> $(curl -s -o /dev/null -w '%{http_code}' $B/v/AAAAAAAAAAAAAAAAAAAAAAAA)"
 echo "admin no pw -> $(curl -s -o /dev/null -w '%{http_code}' $B/admin)"
 P=$(curl -fsS $B/v/$T); echo "page rows: $(grep -o "class='fl" <<<"$P" | wc -l), total shown: $(grep -o 'Total (73 charges)' <<<"$P" | head -1) $(grep -o '\$17,024.09' <<<"$P" | head -1)"
-for r in 1 5 9; do curl -fsS -X POST -H 'Accept: application/json' $B/v/$T/flag/$r; echo; done
+curl -fsS -X POST -H 'Accept: application/json' --data-urlencode 'note=Not a company charge' $B/v/$T/flag/1; echo
+for r in 5 9; do curl -fsS -X POST -H 'Accept: application/json' $B/v/$T/flag/$r; echo; done
 curl -fsS -X POST -H 'Accept: application/json' $B/v/$T/flag/9; echo " <- row 9 unflagged (toggle)"
+curl -fsS $B/v/$T | grep -q 'Note: Not a company charge'
+curl -fsS $B/v/$T | grep -q 'ref pending'
+echo "page shows the flag note and ref pending"
 curl -s -o /dev/null -w 'submit -> %{http_code}\n' -X POST $B/v/$T/submit
 curl -s -o /dev/null -w 'double submit -> %{http_code}\n' -X POST $B/v/$T/submit
 echo "flag after submit -> $(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Accept: application/json' $B/v/$T/flag/2)"
@@ -26,6 +30,25 @@ import sys,json
 for l in sys.stdin:
     r=json.loads(l); print({k:r[k] for k in r if k in ('type','ts','emp','flagged','flagged_total','approved_total','to','cc','status')} if r['type']=='email' else {k:(len(v) if k=='approved' else v) for k,v in r.items() if k in ('type','ts','emp','flagged','approved','flagged_total','approved_total')})"
 echo "--- dry-run email:"; ls $DATA_DIR/outbox; .venv/bin/python -c "import email,glob;m=email.message_from_bytes(open(glob.glob('$DATA_DIR/outbox/*.eml')[0],'rb').read());[print(h+':',m[h]) for h in ('Subject','From','To','Cc')]"
+.venv/bin/python - <<'PY'
+import email, glob, os
+p = glob.glob(os.environ['DATA_DIR'] + '/outbox/*.eml')[0]
+m = email.message_from_bytes(open(p, 'rb').read())
+text = html = ''
+for part in m.walk():
+    if part.get_content_type() == 'text/plain':
+        text = part.get_payload(decode=True).decode()
+    elif part.get_content_type() == 'text/html':
+        html = part.get_payload(decode=True).decode()
+print(text)
+if 'Note: Not a company charge' not in text:
+    raise SystemExit('missing note in text email')
+if 'Note: Not a company charge' not in html:
+    raise SystemExit('missing note in html email')
+if 'ref pending' not in text:
+    raise SystemExit('missing ref pending in text email')
+print('email shows the flag note and ref pending')
+PY
 echo "--- admin CSV:"; curl -fsS -u x:local-admin $B/admin/log.csv | head -3 | cut -c1-160
 curl -fsS -u x:local-admin $B/admin | grep -o "Submitted [^<]*" | head -1
 echo "server still running pid $(cat $DATA_DIR/g.pid) on $B (stop: kill \$(cat $DATA_DIR/g.pid))"

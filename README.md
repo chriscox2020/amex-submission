@@ -7,10 +7,11 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 * Each employee gets a private link per statement: `https://amex.coxresearch.com/v/<token>`.
   The token is an HMAC of (statement, employee) with `TOKEN_SECRET` (144-bit, unguessable).
 * Page = approved v5 layout: "Chris" / "Due by the first", Date · Description · Company · Amount · yellow **⚑ Flag**, Total row, one green **Submit**, Key, Chris AI signature.
-* **Flag**: one click toggles the row (no page reload). Logged.
+* **Flag**: click opens a note box (optional reason, up to 500 characters) with Save and Cancel. Save flags the row and stores the note; clicking a flagged row again clears it. No page reload. Logged.
 * **Submit**: one click approves every unflagged row, locks the page, appends to the log on the persistent disk,
   and automatically emails a record (who, statement, flagged rows, approved rows, timestamp) to
-  `RECORD_TO` = **littledude@coxresearch.com** (optional `RECORD_CC`, e.g. chris@coxresearch.com). No extra step for the employee.
+  `RECORD_TO` = **littledude@coxresearch.com** (optional `RECORD_CC`, e.g. chris@coxresearch.com).
+  Each flagged line is charge date, merchant, amount, flagged date, reference number (or "ref pending"), then the note. No extra step for the employee.
 * Log: `/var/data/log.jsonl` (append-only; opens, flags, unflags, submits, email results).
 * Chris-only admin (HTTP login, any username + `ADMIN_PASSWORD`):
   `/admin` (who has / hasn't submitted + each employee's link), `/admin/log.csv`, `/admin/links.json`,
