@@ -27,6 +27,11 @@ with sync_playwright() as p:
     pg = br.new_page(viewport={'width': 1000, 'height': 1400})
     pg.goto(url)
     pg.on('pageerror', lambda e: print('PAGEERROR', e))
+    assert pg.locator('select.cat').count() == pg.locator('button.fl').count()
+    names = pg.locator('select.cat').first.locator('option').all_inner_texts()
+    for name in ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
+                 'Business Services', 'Other', 'Entertainment', 'Communications'):
+        assert name in names, name
     loads = []; pg.on('load', lambda: loads.append(1))
     pg.set_viewport_size({'width': 390, 'height': 844})
     open_note(pg, 1)
@@ -63,9 +68,16 @@ with sync_playwright() as p:
     save_note(pg, 'a <b>tag</b>')
     pg.wait_for_function("document.querySelectorAll('tr.flagged').length==2")
     pg.screenshot(path='screenshots/browser-after-flag-clicks.png')
+    assert pg.locator('label[for="flagcomment"]').inner_text() == 'Flagged charges'
+    pg.fill('#flagcomment', 'wrong category')
+    with pg.expect_response(lambda r: '/category/' in r.url and r.status == 200):
+        pg.locator('select.cat').nth(9).select_option('Communications')
     pg.locator('button.sub').click(); pg.wait_for_selector('.done')
     done = pg.inner_text('.done')
     print('after Submit click:', done)
     assert 'Note: a <b>tag</b>' in done and 'Note: Second look' in done and 'ref pending' in done
+    assert 'Flagged charges: wrong category' in done
+    assert pg.locator('select.cat').nth(9).input_value() == 'Communications'
+    assert pg.locator('#flagcomment').count() == 0
     pg.screenshot(path='screenshots/browser-after-submit.png')
     br.close()

@@ -19,6 +19,8 @@ for r in 5 9; do curl -fsS -X POST -H 'Accept: application/json' $B/v/$T/flag/$r
 curl -fsS -X POST -H 'Accept: application/json' $B/v/$T/flag/9; echo " <- row 9 unflagged (toggle)"
 curl -fsS $B/v/$T | grep -q 'Note: Not a company charge'
 curl -fsS $B/v/$T | grep -q 'ref pending'
+curl -fsS -X POST -H 'Accept: application/json' --data-urlencode 'comment=wrong category' $B/v/$T/comment; echo
+curl -fsS -X POST -H 'Accept: application/json' --data-urlencode 'category=Travel' $B/v/$T/category/5; echo
 echo "page shows the flag note and ref pending"
 curl -s -o /dev/null -w 'submit -> %{http_code}\n' -X POST $B/v/$T/submit
 curl -s -o /dev/null -w 'double submit -> %{http_code}\n' -X POST $B/v/$T/submit
@@ -47,7 +49,11 @@ if 'Note: Not a company charge' not in html:
     raise SystemExit('missing note in html email')
 if 'ref pending' not in text:
     raise SystemExit('missing ref pending in text email')
-print('email shows the flag note and ref pending')
+if '\nFlagged charges: wrong category\n' not in text:
+    raise SystemExit('missing overall comment in text email')
+if text.index('Flagged charges: wrong category') > text.index('Approved'):
+    raise SystemExit('overall comment is not after the flag lines')
+print('email shows the flag note, ref pending, and overall comment')
 PY
 echo "--- admin CSV:"; curl -fsS -u x:local-admin $B/admin/log.csv | head -3 | cut -c1-160
 curl -fsS -u x:local-admin $B/admin | grep -o "Submitted [^<]*" | head -1

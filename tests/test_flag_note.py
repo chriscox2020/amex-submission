@@ -112,6 +112,13 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.clean_note('x' * 600), 'x' * 500)
         self.assertEqual(app.clean_note(None), '')
         self.assertEqual(app.flag_day(FROZEN), '10/21/2026')
+        self.assertEqual(app.flag_comment_line('  wrong category  '), 'Flagged charges: wrong category')
+        self.assertEqual(app.flag_comment_line('   '), '')
+        self.assertEqual(app.canonical_category(' travel '), 'Travel')
+        self.assertEqual(app.canonical_category('Meals'), '')
+        self.assertEqual(tuple(app.AMEX_CATEGORIES), (
+            'Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
+            'Business Services', 'Other', 'Entertainment', 'Communications'))
 
     def test_sample_page_and_record_email(self):
         amazon = self.flag(1, 'not my charge')
@@ -126,6 +133,15 @@ class FlagNoteTest(unittest.TestCase):
         # No-JS form post: blank note is stored and the line has no Note suffix.
         blank = self.flag(3, '   \n  ', accept=False)
         self.assertEqual(blank.status_code, 303)
+        saved = self.client.post(f'/v/{self.token}/comment', data={'comment': 'wrong category'},
+                                 headers={'Accept': 'application/json'})
+        self.assertEqual(saved.get_json()['comment'], 'wrong category')
+        cat = self.client.post(f'/v/{self.token}/category/4', data={'category': 'restaurant'},
+                               headers={'Accept': 'application/json'})
+        self.assertEqual(cat.get_json()['category'], 'Restaurant')
+        rejected = self.client.post(f'/v/{self.token}/category/4', data={'category': 'Meals'},
+                                    headers={'Accept': 'application/json'})
+        self.assertEqual(rejected.status_code, 400)
 
         page = self.page()
         for line in (LINE_NOTE, LINE_HTML, LINE_BLANK):
@@ -134,8 +150,14 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.flags()[0]['note'], 'not my charge')
         self.assertEqual(self.flags()[1]['note'], 'fee <b>wrong</b> & high')
         self.assertEqual(self.flags()[2]['note'], '')
+        self.assertIn('>wrong category</textarea>', page)
+        self.assertIn('>Flagged charges</label>', page)
+        self.assertIn("<option value='Travel' selected>Travel</option>", page)
+        self.assertIn("<option value='Restaurant' selected>Restaurant</option>", page)
+        for name in app.AMEX_CATEGORIES:
+            self.assertIn(html.escape(name), page)
 
-        submitted = self.client.post(f'/v/{self.token}/submit')
+        submitted = self.client.post(f'/v/{self.token}/submit', data={'comment': 'wrong category'})
         self.assertEqual(submitted.status_code, 303)
         again = self.client.post(f'/v/{self.token}/submit')
         self.assertEqual(again.status_code, 303)
@@ -145,6 +167,7 @@ class FlagNoteTest(unittest.TestCase):
 
         summary = self.page()
         self.assertIn('Submitted', summary)
+        self.assertIn('Flagged charges: wrong category', summary)
         for line in (LINE_NOTE, LINE_HTML, LINE_BLANK):
             self.assertIn(html.escape(line), summary)
         self.assertNotIn('<b>wrong</b>', summary)
@@ -165,15 +188,22 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('\n  ' + LINE_BLANK + '\n', text)
         self.assertLess(text.index(LINE_NOTE), text.index(LINE_HTML))
         self.assertLess(text.index(LINE_HTML), text.index(LINE_BLANK))
+        self.assertIn('\nFlagged charges: wrong category\n', text)
+        self.assertLess(text.index(LINE_BLANK), text.index('Flagged charges: wrong category'))
+        self.assertLess(text.index('Flagged charges: wrong category'), text.index('Approved'))
         self.assertNotIn('&amp;', text)
         self.assertNotIn('&lt;', text)
         for line in (LINE_NOTE, LINE_HTML, LINE_BLANK):
             self.assertIn(html.escape(line), html_body)
         self.assertNotIn('<b>wrong</b>', html_body)
+        self.assertIn('Flagged charges: wrong category', html_body)
+        self.assertLess(html_body.index(html.escape(LINE_BLANK)), html_body.index('Flagged charges: wrong category'))
+        self.assertLess(html_body.index('Flagged charges: wrong category'), html_body.index('Approved'))
         flagged_html, approved_html = html_body.split('Approved', 1)
         self.assertIn(html.escape(LINE_NOTE), flagged_html)
         self.assertNotIn('AMAZON MARKETPLACE', approved_html)
         self.assertIn('JOE&#x27;S DINER', approved_html)
+        self.assertIn('Restaurant', approved_html)
         self.assertNotIn(LINE_NOTE, approved_html)
 
         sample = (
@@ -238,6 +268,40 @@ class FlagNoteTest(unittest.TestCase):
                                     headers={'Accept': 'application/json'})
         self.assertEqual(via_json.get_json()['line'].split('Note: ', 1)[1], 'from json <b>')
         self.assertIn('Note: from json &lt;b&gt;', self.page())
+
+    def test_overall_comment_and_category_are_safe(self):
+        missing = self.client.post(f'/v/{self.token}/comment?comment=from-query', headers={'Accept': 'application/json'})
+        self.assertEqual(missing.status_code, 400)
+        self.flag(1, 'n')
+        nasty = 'a <b> & "q"'
+        self.client.post(f'/v/{self.token}/comment', data={'comment': nasty}, headers={'Accept': 'application/json'})
+        self.client.post(f'/v/{self.token}/category/1', data={'category': '=Other'}, headers={'Accept': 'application/json'})
+        self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Other'},
+                                          headers={'Accept': 'application/json'}).get_json()['category'], 'Other')
+        self.client.post(f'/v/{self.token}/submit', data={'comment': nasty})
+        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        text = html_body = ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                text = part.get_payload(decode=True).decode()
+            elif part.get_content_type() == 'text/html':
+                html_body = part.get_payload(decode=True).decode()
+        self.assertIn('Flagged charges: a <b> & "q"', text)
+        self.assertNotIn('&amp;', text)
+        self.assertIn('Flagged charges: a &lt;b&gt; &amp; &quot;q&quot;', html_body)
+        self.assertNotIn('a <b>', html_body)
+        page = self.page()
+        self.assertIn('Flagged charges: a &lt;b&gt; &amp; &quot;q&quot;', page)
+        self.assertEqual(self.client.post(f'/v/{self.token}/comment', data={'comment': 'later'},
+                                          headers={'Accept': 'application/json'}).status_code, 409)
+        self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Travel'},
+                                          headers={'Accept': 'application/json'}).status_code, 409)
+        before = len(app.read_log())
+        self.assertEqual(self.client.post('/v/AAAAAAAAAAAAAAAAAAAAAAAA/comment', data={'comment': 'x'},
+                                          headers={'Accept': 'application/json'}).status_code, 404)
+        self.assertEqual(self.client.post('/v/AAAAAAAAAAAAAAAAAAAAAAAA/category/1', data={'category': 'Travel'},
+                                          headers={'Accept': 'application/json'}).status_code, 404)
+        self.assertEqual(len(app.read_log()), before)
 
 
 if __name__ == '__main__':

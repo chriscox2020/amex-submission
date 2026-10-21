@@ -71,26 +71,31 @@ def read_log():
     return out
 
 def state(stmt, emp_id):
-    """Current flags (row id -> {note, ts}) and the latest submit, if any.
+    """Flags (row id -> {note, ts}), submit snapshot, overall comment, category choices.
 
     A dict still supports the `in` and `len` checks callers already use.
     Log lines written before notes existed have no note key; those stay valid.
+    A category choice is recorded only after the employee uses the dropdown.
     """
-    flags, submitted = {}, None
+    flags, submitted, comment, categories = {}, None, '', {}
     for r in read_log():
         if r.get('stmt') != stmt or r.get('emp_id') != emp_id: continue
         if r['type'] == 'flag':
             flags[r['row']] = {'note': r.get('note') or '', 'ts': r.get('ts') or ''}
         elif r['type'] == 'unflag': flags.pop(r.get('row'), None)
+        elif r['type'] == 'comment': comment = r.get('comment') or ''
+        elif r['type'] == 'category': categories[r['row']] = r.get('category') or ''
         elif r['type'] == 'submit': submitted = r
-        elif r['type'] == 'reset': flags, submitted = {}, None
-    return flags, submitted
+        elif r['type'] == 'reset': flags, submitted, comment, categories = {}, None, '', {}
+    return flags, submitted, comment, categories
 
 # ---------- email ----------
 def money(a): return f'${a:,.2f}'
 
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
+AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
+                   'Business Services', 'Other', 'Entertainment', 'Communications')
 
 def clean_note(raw):
     """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
@@ -155,33 +160,61 @@ def flag_items_html(rows, flags):
         items.append(f"<li data-row='{int(r['id'])}'>{html.escape(line)}</li>")
     return ''.join(items)
 
-def posted_note():
-    """Note from a JSON or form POST. Never from the query string."""
+def posted_field(name):
+    """Form or JSON field. None when the field was not sent. Never from the query string."""
     data = request.get_json(silent=True)
-    if isinstance(data, dict) and 'note' in data:
-        return clean_note(data.get('note'))
-    if 'note' in request.form:
-        return clean_note(request.form.get('note'))
+    if isinstance(data, dict) and name in data:
+        return data.get(name)
+    if name in request.form:
+        return request.form.get(name)
+    return None
+
+def posted_note():
+    raw = posted_field('note')
+    return '' if raw is None else clean_note(raw)
+
+def canonical_category(value):
+    key = str(value or '').strip().casefold()
+    if not key: return ''
+    for c in AMEX_CATEGORIES:
+        if c.casefold() == key: return c
     return ''
 
-def record_email(doc, e, flagged, approved, ts):
+def chosen_category(row, categories):
+    """Dropdown choice when the employee set one, otherwise a matching original category."""
+    if isinstance(categories, dict) and row.get('id') in categories:
+        return categories[row['id']] or ''
+    return canonical_category(row.get('category'))
+
+def flag_comment_line(comment):
+    comment = clean_note(comment)
+    if not comment: return ''
+    return 'Flagged charges: ' + comment
+
+def record_email(doc, e, flagged, approved, ts, comment=''):
     subj = f"Amex verification SUBMITTED: {e['name']} - {doc['label']} - {len(flagged)} flagged"
     def tbl(rows):
         if not rows: return '<p><i>None</i></p>'
         t = ''.join(f"<tr><td style='padding:4px 8px'>{r['date']}</td><td style='padding:4px 8px'>{html.escape(r['category'])}</td>"
-                    f"<td style='padding:4px 8px'>{html.escape(r['company'])}</td><td style='padding:4px 8px;text-align:right'>{money(r['amount'])}</td></tr>" for r in rows)
-        return f"<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'><tr><th>Date</th><th>Description</th><th>Company</th><th>Amount</th></tr>{t}</table>"
+                    f"<td style='padding:4px 8px'>{html.escape(r['company'])}</td><td style='padding:4px 8px;text-align:right'>{money(r['amount'])}</td>"
+                    f"<td style='padding:4px 8px'>{html.escape(r.get('amex_category') or '')}</td></tr>" for r in rows)
+        return ("<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'><tr><th>Date</th><th>Description</th>"
+                f"<th>Company</th><th>Amount</th><th>Category</th></tr>{t}</table>")
     def flag_html(rows):
         if not rows: return '<p><i>None</i></p>'
         return ''.join("<p style='margin:4px 0;font-size:13px'>" + html.escape(flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))) + "</p>" for r in rows)
     ft = sum(r['amount'] for r in flagged); at = sum(r['amount'] for r in approved)
+    comment_line = flag_comment_line(comment)
+    comment_html = f"<p style='margin:8px 0;font-size:13px'>{html.escape(comment_line)}</p>" if comment_line else ''
+    comment_text = comment_line + '\n' if comment_line else ''
     body = (f"<div style='font-family:Arial,Helvetica,sans-serif'><p><b>{html.escape(e['name'])}</b> submitted the {html.escape(doc['label'])} "
             f"(statement {doc['stmt']}) on {nice(ts)}.</p>"
-            f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{flag_html(flagged)}"
+            f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{flag_html(flagged)}{comment_html}"
             f"<p><b>Approved ({len(approved)}, {money(at)}):</b></p>{tbl(approved)}"
             f"<p style='color:#777;font-size:12px'>Automatic record from {PUBLIC_BASE}. Saved to the log on the server.</p></div>")
     text = (f"{e['name']} submitted {doc['label']} ({doc['stmt']}) at {ts}.\nFlagged ({len(flagged)}, {money(ft)}):\n" +
             ''.join(f"  {flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))}\n" for r in flagged) +
+            comment_text +
             f"Approved ({len(approved)}, {money(at)}).\n")
     return subj, body, text
 
@@ -222,6 +255,8 @@ button:disabled{opacity:.6;cursor:default}
 #flagbox{background:#fff3cd;border:1px solid #e0b000;border-radius:8px;padding:12px 16px;margin:16px 0}
 #flagbox[hidden]{display:none!important}
 #flagbox li,.done li{margin:6px 0;font-size:14px;line-height:1.4}
+.cat{font:14px Arial,Helvetica,sans-serif;max-width:11em}
+#flagcomment{width:100%;box-sizing:border-box;margin-top:4px;font:16px Arial,Helvetica,sans-serif;padding:8px;border:1px solid #c5c9d1;border-radius:4px;background:#fff}
 #notebox{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;display:flex;align-items:center;justify-content:center;padding:16px}
 #notebox[hidden]{display:none!important}
 .notecard{background:#fff;color:#222;border-radius:8px;padding:18px 18px 14px;max-width:480px;width:100%;box-shadow:0 8px 28px rgba(0,0,0,.25)}
@@ -298,10 +333,42 @@ document.getElementById('notesave').addEventListener('click',function(){
 document.getElementById('notecancel').addEventListener('click',closeNote);
 document.getElementById('note').addEventListener('input',function(){document.getElementById('notecount').textContent=String(this.value.length)});
 document.addEventListener('keydown',function(ev){if(!noteBox().hidden && ev.key==='Escape'){ev.preventDefault();closeNote()}});
-noteBox().addEventListener('click',function(ev){if(ev.target===noteBox()) closeNote()});"""
+noteBox().addEventListener('click',function(ev){if(ev.target===noteBox()) closeNote()});
+var commentBox=document.getElementById('flagcomment');
+if(commentBox){
+  var commentTimer=null;
+  commentBox.addEventListener('input',function(){
+    clearTimeout(commentTimer);
+    commentTimer=setTimeout(function(){
+      fetch(commentBox.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'comment='+encodeURIComponent(commentBox.value.slice(0,500))}).catch(function(){});
+    },400);
+  });
+}
+document.querySelectorAll('select.cat').forEach(function(s){
+  s.addEventListener('focus',function(){s.setAttribute('data-prev',s.value)});
+  s.addEventListener('change',function(){
+    var prev=s.getAttribute('data-prev')||'';
+    fetch(s.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(s.value)}).then(function(r){
+      if(!r.ok){s.value=prev;return} s.setAttribute('data-prev',s.value);
+    }).catch(function(){s.value=prev});
+  });
+});"""
 
-def render(doc, e, token, flags, submitted):
+def category_select(token, row, chosen, locked):
+    blank = ' selected' if not chosen else ''
+    opts = [f"<option value=''{blank}>Select</option>"]
+    for c in AMEX_CATEGORIES:
+        sel = ' selected' if c == chosen else ''
+        opts.append(f"<option value='{html.escape(c)}'{sel}>{html.escape(c)}</option>")
+    dis = ' disabled' if locked else ''
+    return (f"<select class='cat' data-row='{int(row['id'])}' data-action='/v/{token}/category/{int(row['id'])}'{dis}>"
+            + ''.join(opts) + "</select>")
+
+def render(doc, e, token, flags, submitted, comment='', categories=None):
     esc = html.escape; rows = e['rows']; locked = submitted is not None
+    categories = categories or {}
+    if submitted is not None and 'comment' in submitted:
+        comment = submitted.get('comment') or ''
     lis = flag_items_html(rows, flags)
     out = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
            f"<meta name='robots' content='noindex'><title>Amex verification - {esc(e['first'])}</title><style>{CSS}</style></head><body><div class='wrap'>",
@@ -309,11 +376,12 @@ def render(doc, e, token, flags, submitted):
            f"<p style='margin:0 0 16px;font-size:14px;color:#555'>{esc(doc.get('due','Due by the first'))}</p>"]
     if locked:
         listed = f"<ul id='flaglist' style='margin:8px 0 0;padding-left:18px'>{lis}</ul>" if lis else ''
+        comment_html = f"<p style='margin:8px 0 0'>{esc(flag_comment_line(comment))}</p>" if flag_comment_line(comment) else ''
         out.append(f"<div class='done'><b>Submitted {esc(nice(submitted['ts']))}.</b> All unflagged charges approved. "
-                   f"{len(submitted['flagged'])} flagged for review. Thank you.{listed}</div>")
+                   f"{len(submitted['flagged'])} flagged for review. Thank you.{listed}{comment_html}</div>")
     out.append(f"<table width='100%' cellspacing='0' cellpadding='0' style='width:100%;border-collapse:collapse;border:1px solid #d9dde3'>"
                f"<tr><th style='{TH}'>Date</th><th style='{TH}'>Description</th><th style='{TH}'>Company</th>"
-               f"<th style='{TH};text-align:right'>Amount</th><th style='{TH};text-align:center'>Flag</th></tr>")
+               f"<th style='{TH};text-align:right'>Amount</th><th style='{TH}'>Category</th><th style='{TH};text-align:center'>Flag</th></tr>")
     for i, r in enumerate(rows):
         on = r['id'] in flags; bg = '#ffffff' if i % 2 == 0 else '#f5f8fc'
         btn = (f"<form class='f' method='post' action='/v/{token}/flag/{r['id']}' style='margin:0'>"
@@ -321,17 +389,22 @@ def render(doc, e, token, flags, submitted):
                f"<button class='fl{' on' if on else ''}'{' disabled' if locked else ''}>&#9873;<span class='t'> {'Flagged' if on else 'Flag'}</span></button></form>")
         out.append(f"<tr class='{'flagged' if on else ''}' style='background:{bg}'><td style='{TD}'><b>{esc(r['date'][:5])}</b></td>"
                    f"<td style='{TD}'>{esc(r['category'])}</td><td style='{TD}'>{esc(r['company'])}</td>"
-                   f"<td style='{TD};text-align:right'><b>{money(r['amount'])}</b></td><td style='padding:14px 8px;border-bottom:1px solid #d9dde3;text-align:center'>{btn}</td></tr>")
+                   f"<td style='{TD};text-align:right'><b>{money(r['amount'])}</b></td>"
+                   f"<td style='{TD}'>{category_select(token, r, chosen_category(r, categories), locked)}</td>"
+                   f"<td style='padding:14px 8px;border-bottom:1px solid #d9dde3;text-align:center'>{btn}</td></tr>")
     tot = sum(r['amount'] for r in rows)
     out.append(f"<tr><td colspan='3' style='padding:14px 12px;font-size:16px;font-weight:bold'>Total ({len(rows)} charges)</td>"
                f"<td style='padding:14px 12px;font-size:16px;font-weight:bold;text-align:right'>{money(tot)}</td>"
-               f"<td style='padding:14px 8px;text-align:center;font-size:14px;color:#555'><span id='nf'>{len(flags)}</span> flagged</td></tr></table>")
+               f"<td></td><td style='padding:14px 8px;text-align:center;font-size:14px;color:#555'><span id='nf'>{len(flags)}</span> flagged</td></tr></table>")
     if not locked:
         hidden = '' if lis else ' hidden'
-        out.append(f"<div id='flagbox'{hidden}><p style='font-weight:bold;margin:0 0 8px'>Flagged for review</p>"
-                   f"<ul id='flaglist' style='margin:0;padding-left:18px'>{lis}</ul></div>")
-        out.append(f"<form method='post' action='/v/{token}/submit' style='text-align:center;margin:24px 0'>"
-                   f"<button class='sub' onclick=\"this.disabled=true;this.form.submit()\">Submit</button></form>")
+        out.append(f"<form method='post' action='/v/{token}/submit'>"
+                   f"<div id='flagbox'{hidden}><p style='font-weight:bold;margin:0 0 8px'>Flagged for review</p>"
+                   f"<ul id='flaglist' style='margin:0;padding-left:18px'>{lis}</ul>"
+                   f"<label for='flagcomment' style='display:block;margin:12px 0 4px;font-weight:bold'>Flagged charges</label>"
+                   f"<textarea id='flagcomment' name='comment' maxlength='500' rows='2' data-action='/v/{token}/comment' "
+                   f"placeholder='e.g. wrong category'>{esc(comment)}</textarea></div>"
+                   f"<div style='text-align:center;margin:24px 0'><button class='sub' onclick=\"this.disabled=true;this.form.submit()\">Submit</button></div></form>")
     out.append("<table width='100%' style='width:100%;border-top:2px solid #d9dde3;font-size:15px;margin-top:16px'><tr><td style='padding-top:14px'>"
                "<p style='font-weight:bold;font-size:17px;margin:0 0 10px'>Key</p>"
                "<p style='margin:8px 0'><span style='display:inline-block;width:90px;font-weight:bold;color:#b38f00'>&#9873; Flag</span>Needs review before the bill is paid.</p>"
@@ -365,9 +438,9 @@ def root(): return Response('Cox Research', mimetype='text/plain')
 def view(token):
     doc, e = resolve(token)
     if not doc: abort(404)
-    flags, sub = state(doc['stmt'], e['id'])
+    flags, sub, comment, categories = state(doc['stmt'], e['id'])
     append({'type': 'open', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta()})
-    page = render(doc, e, token, flags, sub)
+    page = render(doc, e, token, flags, sub, comment, categories)
     act = request.args.get('do', ''); row = request.args.get('row', '')
     if not sub and act == 'flag' and row.isdigit() and int(row) not in flags:
         js = ("<script>window.addEventListener('load',function(){if(document.visibilityState!=='visible')return;"
@@ -385,7 +458,7 @@ def flag(token, row):
     if not doc: abort(404)
     r = next((x for x in e['rows'] if x['id'] == row), None)
     if not r: abort(404)
-    flags, sub = state(doc['stmt'], e['id'])
+    flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
     if sub: return jsonify(error='already submitted', flagged=row in flags, count=len(flags)), 409
     on = row not in flags
     rec = {'type': 'flag' if on else 'unflag', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
@@ -404,20 +477,58 @@ def submit(token):
     doc, e = resolve(token)
     if not doc: abort(404)
     with SUBMIT_LOCK:
-      flags, sub = state(doc['stmt'], e['id'])
+      flags, sub, stored_comment, categories = state(doc['stmt'], e['id'])
       if not sub:
           flagged = attach_flag_meta([r for r in e['rows'] if r['id'] in flags], flags)
-          approved = [r for r in e['rows'] if r['id'] not in flags]
+          approved = [dict(r) for r in e['rows'] if r['id'] not in flags]
+          for r in flagged + approved:
+              r['amex_category'] = chosen_category(r, categories)
+          incoming = posted_field('comment')
+          comment = stored_comment if incoming is None else clean_note(incoming)
           rec = {'type': 'submit', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], **meta(),
                  'flagged': [r['id'] for r in flagged], 'approved': [r['id'] for r in approved],
-                 'flagged_total': round(sum(r['amount'] for r in flagged), 2), 'approved_total': round(sum(r['amount'] for r in approved), 2)}
+                 'flagged_total': round(sum(r['amount'] for r in flagged), 2),
+                 'approved_total': round(sum(r['amount'] for r in approved), 2), 'comment': comment}
           append(rec)
           try:
-              status = send_email(*record_email(doc, e, flagged, approved, rec['ts']))
+              status = send_email(*record_email(doc, e, flagged, approved, rec['ts'], comment))
           except Exception as ex:
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
                   'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
+    return redirect(f'/v/{token}', 303)
+
+@app.post('/v/<token>/comment')
+def set_comment(token):
+    doc, e = resolve(token)
+    if not doc: abort(404)
+    _flags, sub, stored, _categories = state(doc['stmt'], e['id'])
+    if sub: return jsonify(error='already submitted'), 409
+    incoming = posted_field('comment')
+    if incoming is None: return jsonify(error='missing comment'), 400
+    text = clean_note(incoming)
+    if text != stored:
+        append({'type': 'comment', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'comment': text, **meta()})
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(ok=True, comment=text)
+    return redirect(f'/v/{token}', 303)
+
+@app.post('/v/<token>/category/<int:row>')
+def set_category(token, row):
+    doc, e = resolve(token)
+    if not doc: abort(404)
+    r = next((x for x in e['rows'] if x['id'] == row), None)
+    if not r: abort(404)
+    _flags, sub, _comment, _categories = state(doc['stmt'], e['id'])
+    if sub: return jsonify(error='already submitted'), 409
+    raw = posted_field('category')
+    if raw is None: return jsonify(error='missing category'), 400
+    choice = canonical_category(raw)
+    if str(raw).strip() and not choice: return jsonify(error='invalid category'), 400
+    append({'type': 'category', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
+            'date': r['date'], 'category': choice, 'company': r['company'], 'amount': r['amount'], **meta()})
+    if 'application/json' in request.headers.get('Accept', ''):
+        return jsonify(ok=True, row=row, category=choice)
     return redirect(f'/v/{token}', 303)
 
 # ---------- Chris-only admin ----------
@@ -432,7 +543,7 @@ def admin():
     rows = []
     for stmt, doc in sorted(load_statements().items(), reverse=True):
         for e in doc['employees']:
-            flags, sub = state(stmt, e['id'])
+            flags, sub, _comment, _categories = state(stmt, e['id'])
             link = f"{PUBLIC_BASE}/v/{make_token(stmt, e['id'])}"
             st = f"<b style='color:#2e7d32'>Submitted {esc(nice(sub['ts']))}</b>" if sub else "<b style='color:#c62828'>Not submitted</b>"
             rows.append(f"<tr><td>{stmt}</td><td>{esc(e['name'])}</td><td>{st}</td><td>{len(sub['flagged']) if sub else len(flags)}</td>"
@@ -446,13 +557,13 @@ def admin():
 def admin_csv():
     need_admin()
     cols = ['ts', 'type', 'stmt', 'emp_id', 'emp', 'row', 'date', 'category', 'company', 'amount',
-            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua', 'note']
+            'flagged', 'approved', 'flagged_total', 'approved_total', 'to', 'cc', 'status', 'ip', 'ua', 'note', 'comment']
     buf = io.StringIO(); w = csv.DictWriter(buf, cols, extrasaction='ignore'); w.writeheader()
     for r in read_log():
         row = {}
         for k, v in r.items():
             if isinstance(v, list): v = ';'.join(map(str, v))
-            elif k == 'note' and isinstance(v, str) and v[:1] in '=+-@\t\r': v = "'" + v
+            elif k in ('note', 'comment') and isinstance(v, str) and v[:1] in '=+-@\t\r': v = "'" + v
             row[k] = v
         w.writerow(row)
     return Response(buf.getvalue(), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename=amex-verification-log.csv'})
