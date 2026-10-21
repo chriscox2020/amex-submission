@@ -122,9 +122,11 @@ class SummaryTest(unittest.TestCase):
         return {'cat': cats, 'amt': amts}
 
     def post_grid(self, amounts, stmt=AUG, user='Chris', path_suffix='categories'):
+        data = self.grid_data(amounts)
+        data['save'] = '1'
         return self.client.post(
             f'/admin/summary/{stmt}/{path_suffix}',
-            data=self.grid_data(amounts),
+            data=data,
             auth=(user, 'local-admin'),
         )
 
@@ -598,6 +600,125 @@ class SummaryTest(unittest.TestCase):
         repeat = self.post_grid(amounts, user='Meghan')
         self.assertEqual(repeat.status_code, 303)
         self.assertEqual(len([r for r in app.read_log() if r['type'] == 'summary_grid']), 1)
+
+    def test_explicit_save_emails_the_grid_record(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            path.unlink()
+        amounts = [
+            ('Travel', 0), ('Fuel', 0), ('Meals', 10), ('Supplies', -1),
+            ('Parts & Materials', 0), ('Software', 0), ('Entertainment', 5), ('Other', 0),
+        ]
+        auto = self.client.post(
+            f'/admin/summary/{AUG}/categories',
+            data=self.grid_data(amounts),
+            headers={'Accept': 'application/json'},
+            auth=('Chris', 'local-admin'),
+        )
+        self.assertEqual(auto.status_code, 200)
+        self.assertEqual(auto.get_json()['grid_total'], 14.0)
+        self.assertEqual(list(pathlib.Path(app.OUTBOX).glob('*.eml')), [])
+        self.assertEqual([r for r in app.read_log() if r.get('kind') == 'summary_grid'], [])
+        grid_file = pathlib.Path(app.DATA_DIR, 'summary-grids', AUG + '.json')
+        self.assertEqual(json.loads(grid_file.read_text())['amounts']['Supplies'], -100)
+        self.assertEqual(json.loads(grid_file.read_text())['by'], 'Chris')
+
+        saved = self.post_grid(amounts, user='Meghan')
+        self.assertEqual(saved.status_code, 303)
+        page = self.page()
+        self.assertIn("name='save' value='1' id='save-categories'", page)
+        self.assertIn('emails that grid', page)
+        self.assertIn('Typing in a box saves here only.', page)
+        messages = list(pathlib.Path(app.OUTBOX).glob('*.eml'))
+        self.assertEqual(len(messages), 1)
+        msg = email.message_from_bytes(messages[0].read_bytes())
+        self.assertEqual(msg['To'], 'other@example.com')
+        self.assertIsNone(msg['Cc'])
+        self.assertEqual(msg['From'], 'Chris AI <littledude@coxresearch.com>')
+        self.assertEqual(''.join(str(msg['Subject']).splitlines()),
+                         'Amex summary grid SAVED: American Express charges August 2026')
+        text = html_body = ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                text = part.get_payload(decode=True).decode()
+            elif part.get_content_type() == 'text/html':
+                html_body = part.get_payload(decode=True).decode()
+        expected = (
+            "Saved by: Meghan\n"
+            "Saved at: 2026-10-21T09:30:00-05:00\n"
+            "Statement: 2026-08-22\n"
+            "Folder: American Express charges August 2026\n"
+            "\n"
+            "Category | Amount\n"
+            "Travel | $0.00\n"
+            "Fuel | $0.00\n"
+            "Meals | $10.00\n"
+            "Supplies | -$1.00\n"
+            "Parts & Materials | $0.00\n"
+            "Software | $0.00\n"
+            "Entertainment | $5.00\n"
+            "Other | $0.00\n"
+            "Grand total | $14.00\n"
+            "\n"
+        )
+        grid_json = grid_file.read_text()
+        self.assertEqual(text, expected + grid_json)
+        self.assertIn(grid_json.rstrip('\n'), html.unescape(html_body))
+        self.assertIn('<th>Category</th><th>Amount</th>', html_body)
+        self.assertIn('-$1.00', html_body)
+        self.assertIn('<b>Grand total</b>', html_body)
+        self.assertIn('Saved by: Meghan', html_body)
+        self.assertIn('Saved at: 2026-10-21T09:30:00-05:00', html_body)
+        self.assertIn('Statement: 2026-08-22', html_body)
+        self.assertIn('American Express charges August 2026', html_body)
+        self.assertNotIn('QB SUBMIT', str(msg['Subject']))
+        mailed = [r for r in app.read_log() if r.get('kind') == 'summary_grid']
+        self.assertEqual(len(mailed), 1)
+        self.assertEqual(mailed[0]['type'], 'email')
+        self.assertEqual(mailed[0]['by'], 'Meghan')
+        self.assertEqual(mailed[0]['stmt'], AUG)
+        self.assertEqual(mailed[0]['to'], 'other@example.com')
+        self.assertTrue(mailed[0]['status'].startswith('dryrun:'))
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'summary_grid']), 1)
+
+        again = self.post_grid(amounts, user='Meghan')
+        self.assertEqual(again.status_code, 303)
+        self.assertEqual(len([r for r in app.read_log() if r.get('kind') == 'summary_grid']), 2)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'summary_grid']), 1)
+
+        def boom(_msg):
+            raise OSError('smtp down')
+        app.send_prepared = boom
+        changed = [(name, 2 if name == 'Fuel' else dollars) for name, dollars in amounts]
+        failed = self.post_grid(changed, user='Chris')
+        self.assertEqual(failed.status_code, 303)
+        stored = json.loads(grid_file.read_text())
+        self.assertEqual(stored['by'], 'Chris')
+        self.assertEqual(stored['amounts']['Fuel'], 200)
+        self.assertEqual(stored['stmt'], AUG)
+        err = [r for r in app.read_log() if r.get('kind') == 'summary_grid'][-1]
+        self.assertEqual(err['status'], 'error: OSError: smtp down')
+        self.assertEqual(err['to'], 'other@example.com')
+        kept = email.message_from_bytes(messages[0].read_bytes())
+        kept_text = ''
+        for part in kept.walk():
+            if part.get_content_type() == 'text/plain':
+                kept_text = part.get_payload(decode=True).decode()
+        self.assertIn('Supplies | -$1.00', kept_text)
+        self.assertNotIn('Fuel | $2.00', kept_text)
+
+        app.send_prepared = self._send
+        app.RECORD_CC = 'chris@coxresearch.com'
+        try:
+            copied = self.post_grid(changed, user='Chris')
+        finally:
+            app.RECORD_CC = ''
+        self.assertEqual(copied.status_code, 303)
+        cc_msg = email.message_from_bytes(messages[0].read_bytes())
+        self.assertEqual(cc_msg['To'], 'other@example.com')
+        self.assertEqual(cc_msg['Cc'], 'chris@coxresearch.com')
+        self.assertEqual(''.join(str(cc_msg['Subject']).splitlines()),
+                         'Amex summary grid SAVED: American Express charges August 2026')
 
     def test_qb_submit_uses_grid_values(self):
         self.submit_employee(self.ada, 'Entertainment', 2)

@@ -10,7 +10,8 @@ One page per employee per statement, reached by an unguessable token link.
            reference (or "ref pending"), then the note.
 Charge review stays in this app. An employee's Submit writes the log and the record email only.
 Chris and Meghan have a separate summary page. It lists each employee and a category
-grid they can edit by hand. Sending that grid emails Littledude.
+grid they can edit by hand. The Save button emails that grid to RECORD_TO. Sending
+the grid for the bill emails Littledude.
 This server does not call QuickBooks or Dropbox.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
@@ -346,6 +347,55 @@ def record_email(doc, e, flagged, approved, ts, comment=''):
             ''.join(f"  {flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))}\n" for r in flagged) +
             comment_text +
             f"Approved ({len(approved)}, {money(at)}).\n")
+    return subj, body, text
+
+def grid_record_email(built, stored):
+    """Record email for an explicit summary-grid Save. Same delivery path as an employee Submit.
+
+    The plain-text body is the format Littledude files. Amounts in the table are dollars.
+    The JSON is the same object written to summary-grids/<stmt>.json, with amounts in cents.
+    """
+    folder = built['period']['folder_label']
+    subj = f"Amex summary grid SAVED: {folder}"
+    rows = [(name, summary.format_money(cents)) for name, cents in built['categories']]
+    rows.append(('Grand total', summary.format_money(built['grid_cents'])))
+    grid_json = json.dumps(stored, indent=1)
+    text = (
+        f"Saved by: {stored['by']}\n"
+        f"Saved at: {stored['ts']}\n"
+        f"Statement: {stored['stmt']}\n"
+        f"Folder: {folder}\n"
+        "\n"
+        "Category | Amount\n"
+        + "\n".join(f"{name} | {amount}" for name, amount in rows)
+        + "\n\n"
+        + grid_json
+        + "\n"
+    )
+    html_rows = ''.join(
+        f"<tr><td style='padding:4px 8px'>{html.escape(name)}</td>"
+        f"<td style='padding:4px 8px;text-align:right'>{html.escape(amount)}</td></tr>"
+        for name, amount in rows[:-1]
+    )
+    total_name, total_amount = rows[-1]
+    html_rows += (
+        f"<tr><td style='padding:4px 8px'><b>{html.escape(total_name)}</b></td>"
+        f"<td style='padding:4px 8px;text-align:right'><b>{html.escape(total_amount)}</b></td></tr>"
+    )
+    body = (
+        "<div style='font-family:Arial,Helvetica,sans-serif'>"
+        f"<p>Saved by: {html.escape(stored['by'])}<br>"
+        f"Saved at: {html.escape(stored['ts'])}<br>"
+        f"Statement: {html.escape(stored['stmt'])}<br>"
+        f"Folder: {html.escape(folder)}</p>"
+        "<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'>"
+        "<tr><th>Category</th><th>Amount</th></tr>"
+        f"{html_rows}</table>"
+        f"<pre style='font-family:Consolas,monospace;font-size:13px'>{html.escape(grid_json)}</pre>"
+        "<p style='color:#777;font-size:12px'>Automatic record from the summary grid Save button. "
+        "This message was only emailed. The verification server did not contact QuickBooks or Dropbox.</p>"
+        "</div>"
+    )
     return subj, body, text
 
 def send_prepared(msg):
@@ -1098,7 +1148,8 @@ def render_summary_page(built, actor, qb):
                      f"<td class='n'>{summary.format_money(person['total_cents'])}</td></tr>")
     parts.append("</table><h2>Categories</h2>")
     parts.append("<p class='hint'>Amounts start from submitted charges. Edit any row by hand. "
-                 "Save keeps the amounts for this statement. Submit sends these amounts.</p>")
+                 "Save keeps the amounts for this statement and emails that grid. "
+                 "Typing in a box saves here only. Submit sends these amounts.</p>")
     if qb:
         when = esc(nice(qb['ts'])) if qb.get('ts') else ''
         parts.append(f"<p class='amex-total' id='amex-total' data-cents='{built['statement_cents']}'>"
@@ -1138,7 +1189,7 @@ def render_summary_page(built, actor, qb):
                 when = ''
             if when:
                 parts.append(f"<p id='grid-saved'>Saved {esc(when)} by {esc(saved.get('by') or '')}.</p>")
-        parts.append("<button class='save' type='submit' id='save-categories'>Save</button>")
+        parts.append("<button class='save' type='submit' name='save' value='1' id='save-categories'>Save</button>")
         parts.append(f"<button class='qb' type='submit' formaction='/admin/summary/{esc(stmt)}/qb-submit' "
                      f"id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button></form>")
         parts.append(f"<script>{GRID_SCRIPT}</script>")
@@ -1262,11 +1313,19 @@ def summary_save_categories(stmt):
         built = apply_posted(doc, posted)
         amounts = {name: cents for name, cents in built['categories']}
         previous = read_grid(stmt)
-        write_grid(stmt, amounts, actor)
+        stored = write_grid(stmt, amounts, actor)
         if previous != amounts:
             payload = summary.category_payload(built)
             append({'type': 'summary_grid', 'stmt': stmt, 'by': actor, **meta(),
                     'categories': payload['categories'], 'grid_total': payload['grand_total']})
+        # The Save button posts save=1. The per-input autosave does not, so it stays local.
+        if request.form.get('save') == '1':
+            try:
+                status = send_email(*grid_record_email(built, stored))
+            except Exception as ex:
+                status = f'error: {type(ex).__name__}: {ex}'
+            append({'type': 'email', 'stmt': stmt, 'by': actor, 'ts': stored['ts'],
+                    'to': RECORD_TO, 'cc': RECORD_CC, 'status': status, 'kind': 'summary_grid'})
     if 'application/json' in request.headers.get('Accept', ''):
         return jsonify(ok=True, grid_total=round(built['grid_cents'] / 100, 2),
                        statement_total=round(built['statement_cents'] / 100, 2),

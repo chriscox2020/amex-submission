@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Browser check of the monthly summary page. Does not send email."""
-import json, os, pathlib, shutil, tempfile, threading, urllib.request
+import email, json, os, pathlib, shutil, tempfile, threading, urllib.request
 from base64 import b64encode
 from playwright.sync_api import sync_playwright
 
@@ -156,6 +156,19 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').is_enabled()
     assert pg.locator('#running-sum').inner_text() == '$17.50'
     assert '$17.50' in pg.locator('#amex-total').inner_text()
+
+    def saved_subjects():
+        found = []
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            msg = email.message_from_bytes(path.read_bytes())
+            found.append(''.join(str(msg['Subject']).splitlines()))
+        return found
+
+    assert not any(s.startswith('Amex summary grid SAVED:') for s in saved_subjects())
+    pg.locator('#save-categories').click()
+    pg.locator('#grid-saved').wait_for()
+    assert pg.locator('#grid-saved').inner_text() == 'Saved Oct 21, 2026 9:30 AM CT by Chris.'
+    assert saved_subjects().count('Amex summary grid SAVED: American Express charges August 2026') == 1
     fuel = pg.locator('input[data-category="Fuel"]')
     fuel.fill('1.00')
     assert pg.locator('#running-sum').inner_text() == '$18.50'
@@ -164,6 +177,8 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').is_disabled()
     fuel.fill('$0.00')
     fuel.blur()
+    pg.wait_for_timeout(300)
+    assert len([r for r in app.read_log() if r.get('kind') == 'summary_grid']) == 1
     assert pg.locator('#summary-warning').count() == 0
     assert pg.locator('#qb-submit').is_enabled()
     pg.locator('#qb-submit').click()
