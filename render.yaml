@@ -32,6 +32,8 @@ services:
         value: littledude@mail.grokbot.com
       - key: RECORD_CC             # optional, e.g. chris@coxresearch.com
         value: ""
+      - key: SUMMARY_TO            # month summary after QuickBooks confirm; employees are never added
+        value: chris@coxresearch.com, meghan@coxresearch.com
       - key: MAIL_FROM
         value: Chris AI <littledude@coxresearch.com>
       - key: SMTP_HOST

@@ -3,7 +3,7 @@
 
   .venv/bin/python tests/test_summary.py
 """
-import email, html, json, os, pathlib, tempfile, unittest, zipfile
+import email, html, io, json, os, pathlib, tempfile, unittest, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TMP = tempfile.mkdtemp(prefix='amex-summary-')
@@ -88,6 +88,7 @@ class SummaryTest(unittest.TestCase):
         self._now = app.now
         app.now = lambda: FROZEN
         self._send = app.send_prepared
+        self._summary_to = app.SUMMARY_TO
         if os.path.exists(app.LOG):
             os.remove(app.LOG)
         out = pathlib.Path(app.OUTBOX)
@@ -107,6 +108,7 @@ class SummaryTest(unittest.TestCase):
     def tearDown(self):
         app.now = self._now
         app.send_prepared = self._send
+        app.SUMMARY_TO = self._summary_to
 
     def auth_get(self, path, user='Chris', password='local-admin'):
         return self.client.get(path, auth=(user, password))
@@ -836,6 +838,127 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(refused.status_code, 409)
         self.assertEqual(refused.get_json()['difference'], 0)
         self.assertEqual(self.qb_messages(), [])
+
+    def _summary_copies(self):
+        found = []
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            msg = email.message_from_bytes(path.read_bytes())
+            if str(msg['Subject'] or '').startswith('American Express summary:'):
+                found.append(msg)
+        return found
+
+    def test_confirmed_submit_emails_summary_only_to_owners(self):
+        self.assertEqual(app.summary_copy_recipients(),
+                         ['chris@coxresearch.com', 'meghan@coxresearch.com'])
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(sent.status_code, 303)
+        copies = self._summary_copies()
+        self.assertEqual(len(copies), 1)
+        msg = copies[0]
+        self.assertEqual(''.join(str(msg['Subject']).splitlines()),
+                         'American Express summary: August 2026')
+        self.assertEqual(msg['To'], 'chris@coxresearch.com, meghan@coxresearch.com')
+        self.assertIsNone(msg['Cc'])
+        self.assertIsNone(msg['Bcc'])
+        header_blob = ' '.join(str(msg[h] or '') for h in ('To', 'Cc', 'Bcc'))
+        for banned in ('ada@coxresearch.com', 'ben@coxresearch.com', 'other@example.com',
+                       'littledude@mail.grokbot.com', 'cara@coxresearch.com'):
+            self.assertNotIn(banned, header_blob)
+        text = html_body = ''
+        files = {}
+        for part in msg.walk():
+            name = part.get_filename()
+            if name:
+                files[name] = part.get_payload(decode=True)
+            elif part.get_content_type() == 'text/plain':
+                text = part.get_payload(decode=True).decode()
+            elif part.get_content_type() == 'text/html':
+                html_body = part.get_payload(decode=True).decode()
+        pdf_name = 'American Express charges August 2026 - Summary.pdf'
+        xlsx_name = 'American Express charges August 2026 - Summary.xlsx'
+        self.assertEqual(set(files), {pdf_name, xlsx_name})
+        self.assertTrue(files[pdf_name].startswith(b'%PDF'))
+        self.assertIn(b'Grand total: $17.50', files[pdf_name])
+        with zipfile.ZipFile(io.BytesIO(files[xlsx_name])) as zf:
+            sheet = zf.read('xl/worksheets/sheet1.xml').decode()
+        self.assertIn('Grand total', sheet)
+        self.assertIn('17.50', sheet)
+        for name in summary.CATEGORIES:
+            self.assertIn(f'{name} | ', text)
+            self.assertIn(html.escape(name), html_body)
+        self.assertIn('Grand total | $17.50', text)
+        self.assertIn('<b>Grand total</b>', html_body)
+        self.assertIn('Submitted by: Chris', text)
+        self.assertIn('Statement: 2026-08-22', text)
+        self.assertNotIn('submission.json', text)
+        logged = [r for r in app.read_log() if r.get('kind') == 'summary_copy']
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(logged[0]['to'], 'chris@coxresearch.com, meghan@coxresearch.com')
+        self.assertEqual(logged[0]['by'], 'Chris')
+        self.assertEqual(logged[0]['stmt'], AUG)
+        self.assertTrue(str(logged[0]['status']).startswith('dryrun:'))
+        qb = self.qb_messages()
+        self.assertEqual(len(qb), 1)
+        self.assertEqual(qb[0]['To'], 'littledude@mail.grokbot.com')
+
+    def test_summary_copy_failure_keeps_the_lock(self):
+        self.submit_employee(self.ada, 'Entertainment', 2)
+        self.submit_employee(self.ben)
+        real = app.send_prepared
+
+        def selective(msg):
+            if str(msg['Subject'] or '').startswith('QB SUBMIT:'):
+                return real(msg)
+            raise OSError('summary smtp down')
+
+        app.send_prepared = selective
+        sent = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(sent.status_code, 303)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'qb_submit']), 1)
+        logged = [r for r in app.read_log() if r.get('kind') == 'summary_copy']
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(logged[0]['status'], 'error: OSError: summary smtp down')
+        self.assertEqual(logged[0]['to'], 'chris@coxresearch.com, meghan@coxresearch.com')
+        self.assertIn('Sent for posting', self.page())
+        locked = self.post_grid([(name, 1) for name in summary.CATEGORIES])
+        self.assertEqual(locked.status_code, 409)
+        self.assertEqual(self._summary_copies(), [])
+        self.assertEqual(len(self.qb_messages()), 1)
+
+    def test_summary_to_drops_employees(self):
+        app.SUMMARY_TO = ' ada@coxresearch.com, books@example.com, ada@coxresearch.com '
+        self.assertEqual(app.summary_copy_recipients(), ['books@example.com'])
+        self.submit_employee(self.cara)
+        sent = self.auth_post(f'/admin/summary/{JUL}/qb-submit', user='Meghan')
+        self.assertEqual(sent.status_code, 303)
+        copies = self._summary_copies()
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0]['To'], 'books@example.com')
+        self.assertEqual(copies[0]['Subject'], 'American Express summary: July 2026')
+        self.assertIsNone(copies[0]['Cc'])
+        self.assertIsNone(copies[0]['Bcc'])
+        self.assertNotIn('ada@', copies[0]['To'])
+        self.assertNotIn('cara@', copies[0]['To'])
+        self.assertNotIn('chris@', copies[0]['To'])
+        self.assertNotIn('meghan@', copies[0]['To'])
+        logged = [r for r in app.read_log() if r.get('kind') == 'summary_copy']
+        self.assertEqual(logged[0]['to'], 'books@example.com')
+        self.assertEqual(logged[0]['by'], 'Meghan')
+
+        app.SUMMARY_TO = 'ada@coxresearch.com, ben@coxresearch.com, cara@coxresearch.com'
+        self.assertEqual(app.summary_copy_recipients(), [])
+        self.submit_employee(self.ada)
+        self.submit_employee(self.ben)
+        skipped = self.auth_post(f'/admin/summary/{AUG}/qb-submit')
+        self.assertEqual(skipped.status_code, 303)
+        self.assertEqual(len([r for r in app.read_log() if r['type'] == 'qb_submit' and r['stmt'] == AUG]), 1)
+        skip_log = next(r for r in app.read_log() if r.get('kind') == 'summary_copy' and r['stmt'] == AUG)
+        self.assertEqual(skip_log['status'], 'skipped: no recipients')
+        self.assertEqual(skip_log['to'], '')
+        self.assertFalse(any(str(m['Subject']).endswith('August 2026') for m in self._summary_copies()))
+        self.assertIn('Sent for posting', self.page())
 
     def test_no_service_credentials(self):
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()

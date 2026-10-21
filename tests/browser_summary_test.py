@@ -198,6 +198,7 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').is_enabled()
     assert [r for r in app.read_log() if r['type'] == 'qb_submit'] == qb_before
     assert not any(s.startswith('QB SUBMIT:') for s in saved_subjects())
+    assert not any(s.startswith('American Express summary:') for s in saved_subjects())
     pg.locator('#qb-submit').click()
     pg.locator('#qb-confirm').wait_for(state='visible')
     pg.locator('#qb-yes').click()
@@ -205,6 +206,16 @@ with sync_playwright() as p:
     assert pg.locator('#sent').inner_text() == 'Sent for posting'
     assert 'Oct 21, 2026 9:30 AM CT by Chris.' in pg.locator('#sent-when').inner_text()
     assert pg.locator('#qb-submit').count() == 0
+    owner_mail = []
+    for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+        msg = email.message_from_bytes(path.read_bytes())
+        if ''.join(str(msg['Subject']).splitlines()) == 'American Express summary: August 2026':
+            owner_mail.append(msg)
+    assert len(owner_mail) == 1, saved_subjects()
+    assert owner_mail[0]['To'] == 'chris@coxresearch.com, meghan@coxresearch.com'
+    assert owner_mail[0]['Cc'] is None
+    assert 'ada@' not in str(owner_mail[0]['To'])
+    assert 'ben@' not in str(owner_mail[0]['To'])
     pg.screenshot(path=str(shots / 'summary-sent.png'), full_page=True)
 
     employee = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()

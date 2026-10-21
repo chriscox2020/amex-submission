@@ -30,6 +30,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   Pressing it opens an in-page dialog: "Are you sure? This will submit the &lt;Month YYYY&gt; category totals." **Yes** sends the grid amounts (not a fresh sum of the charges), locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`. **Cancel** closes the dialog and sends nothing.
   The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`).
   The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`.
+  The same confirmation also emails the month summary to `SUMMARY_TO` (default `chris@coxresearch.com, meghan@coxresearch.com`). Subject: `American Express summary: <Month YYYY>`. The body is the category table with amounts and a grand total. The summary PDF and spreadsheet are attached. That message goes to no one else: no `RECORD_TO`, no `RECORD_CC`, and no employee address, even if one is listed in `SUMMARY_TO`. If that send fails, the failure is logged and the month stays locked.
   Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.
   Littledude creates the bill and files the attachments. This server stores no QuickBooks or Dropbox credentials and does not call either service.
   After the month is locked, flag, category, comment, submit, grid edits, and admin reset return 409.
@@ -60,6 +61,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 | `EMAIL_MODE` | `dryrun` → `smtp` once the mail password is in | Littledude |
 | `RECORD_TO` | `littledude@mail.grokbot.com` | preset. The old `littledude@coxresearch.com` value is rewritten to this address. |
 | `RECORD_CC` | empty, or `chris@coxresearch.com` | Chris decides |
+| `SUMMARY_TO` | `chris@coxresearch.com, meghan@coxresearch.com` | preset. Blank uses this same list. |
 | `MAIL_FROM` | `Chris AI <littledude@coxresearch.com>` | preset |
 | `SMTP_HOST/PORT/USER` | `smtp.office365.com` / `587` / `littledude@coxresearch.com` | preset |
 | `SMTP_PASSWORD` | littledude mailbox password | **Chris, typed into the Render dashboard only** |

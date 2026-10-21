@@ -11,7 +11,7 @@ One page per employee per statement, reached by an unguessable token link.
 Charge review stays in this app. An employee's Submit writes the log and the record email only.
 Chris and Meghan have a separate summary page. It lists each employee and a category
 grid they can edit by hand. The Save button emails that grid to RECORD_TO. Sending
-the grid for the bill emails Littledude.
+the grid for the bill emails Littledude, then emails the summary to SUMMARY_TO.
 This server does not call QuickBooks or Dropbox.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
@@ -39,6 +39,9 @@ def normalize_record_to(raw):
     return raw
 RECORD_TO = normalize_record_to(os.environ.get('RECORD_TO', ''))
 RECORD_CC = os.environ.get('RECORD_CC', '')                   # optional, e.g. chris@coxresearch.com
+# Month summary mailed when QuickBooks submit is confirmed. Employees are never added.
+OWNER_SUMMARY_TO = ('chris@coxresearch.com', 'meghan@coxresearch.com')
+SUMMARY_TO = os.environ.get('SUMMARY_TO', '')
 # PERMANENT (Chris, Oct 21 2026): Alice E Cox's page link and verification email
 # ALWAYS go to this address, never alice@. Do not change on go-live or later.
 ALICE_SEND_TO = 'chris@coxresearch.com'
@@ -1253,6 +1256,98 @@ def write_summary_files(built):
         records.append((fn, raw))
     return folder, records
 
+def parse_address_list(raw, default):
+    """Comma-separated addresses. Blank uses default. Order is kept, duplicates dropped."""
+    text = default if raw is None or not str(raw).strip() else str(raw)
+    out, seen = [], set()
+    for part in text.split(','):
+        addr = part.strip()
+        key = addr.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(addr)
+    return out
+
+def summary_copy_recipients():
+    """SUMMARY_TO, or Chris and Meghan when that is blank. Employee addresses are removed.
+
+    Chris and Meghan stay even if a cardholder record uses one of those inboxes.
+    """
+    configured = parse_address_list(SUMMARY_TO, ', '.join(OWNER_SUMMARY_TO))
+    owners = {addr.casefold() for addr in OWNER_SUMMARY_TO}
+    blocked = set()
+    for doc in load_statements().values():
+        for emp in doc.get('employees') or []:
+            for key in ('email', 'send_to'):
+                addr = str(emp.get(key) or '').strip().casefold()
+                if addr and addr not in owners:
+                    blocked.add(addr)
+    return [addr for addr in configured if addr.casefold() not in blocked]
+
+def summary_copy_email(built, actor, recipients):
+    """Category table plus the summary PDF and spreadsheet. No other attachments."""
+    rows = [(name, summary.format_money(cents)) for name, cents in built['categories']]
+    rows.append(('Grand total', summary.format_money(built['grid_cents'])))
+    month = built['period']['month_label']
+    text = (
+        f"American Express summary for {month}\n"
+        f"Statement: {built['stmt']}\n"
+        f"Submitted by: {actor}\n"
+        "\n"
+        "Category | Amount\n"
+        + "\n".join(f"{name} | {amount}" for name, amount in rows)
+        + "\n\n"
+        "The summary PDF and spreadsheet are attached.\n"
+    )
+    html_rows = ''.join(
+        f"<tr><td style='padding:4px 8px'>{html.escape(name)}</td>"
+        f"<td style='padding:4px 8px;text-align:right'>{html.escape(amount)}</td></tr>"
+        for name, amount in rows[:-1]
+    )
+    total_name, total_amount = rows[-1]
+    html_rows += (
+        f"<tr><td style='padding:4px 8px'><b>{html.escape(total_name)}</b></td>"
+        f"<td style='padding:4px 8px;text-align:right'><b>{html.escape(total_amount)}</b></td></tr>"
+    )
+    html_body = (
+        "<div style='font-family:Arial,Helvetica,sans-serif'>"
+        f"<p>American Express summary for {html.escape(month)}<br>"
+        f"Statement: {html.escape(built['stmt'])}<br>"
+        f"Submitted by: {html.escape(actor)}</p>"
+        "<table style='border-collapse:collapse;font-size:13px' border='1' cellspacing='0'>"
+        "<tr><th>Category</th><th>Amount</th></tr>"
+        f"{html_rows}</table>"
+        "<p>The summary PDF and spreadsheet are attached.</p>"
+        "</div>"
+    )
+    msg = EmailMessage()
+    msg['Subject'] = f"American Express summary: {month}"
+    msg['From'] = MAIL_FROM
+    msg['To'] = ', '.join(recipients)
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype='html')
+    msg.add_attachment(summary.build_pdf(built), maintype='application', subtype='pdf',
+                       filename=summary.summary_filename(built, 'pdf'))
+    msg.add_attachment(summary.build_xlsx(built), maintype='application',
+                       subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                       filename=summary.summary_filename(built, 'xlsx'))
+    return msg
+
+def send_summary_copy(built, actor):
+    """Mail the month summary to SUMMARY_TO. A failure is logged and does not unlock the month."""
+    recipients = summary_copy_recipients()
+    if not recipients:
+        status = 'skipped: no recipients'
+    else:
+        try:
+            status = send_prepared(summary_copy_email(built, actor, recipients))
+        except Exception as ex:
+            status = f'error: {type(ex).__name__}: {ex}'
+    append({'type': 'email', 'kind': 'summary_copy', 'stmt': built['stmt'], 'by': actor, **meta(),
+            'to': ', '.join(recipients), 'status': status})
+    return status
+
 def qb_email(built, actor):
     text, html_body = summary.qb_bodies(built, actor)
     msg = EmailMessage()
@@ -1388,6 +1483,7 @@ def summary_qb_submit(stmt):
                 'summary_total': payload['grand_total'], 'statement_total': payload['statement_total'],
                 'categories': payload['categories'], 'to': RECORD_ADDRESS, 'email_status': status,
                 'files': folder})
+        send_summary_copy(built, actor)
     return redirect(f'/admin/summary/{stmt}', 303)
 
 if __name__ == '__main__':
