@@ -189,6 +189,7 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn('Submit to QuickBooks for Pay', ada_page)
         self.assertNotIn('category-grid', ada_page)
         self.assertNotIn('save-categories', ada_page)
+        self.assertNotIn('qb-confirm', ada_page)
         self.assertNotIn("id='amex-total'", ada_page)
         self.assertIn(">Meals<", ada_page)
         self.assertIn(">Travel<", ada_page)
@@ -274,6 +275,10 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn("id='summary-warning'", ready)
         self.assertIn("id='qb-submit'>Submit to QuickBooks for Pay", ready)
         self.assertNotIn("id='qb-submit' disabled", ready)
+        self.assertIn("id='qb-confirm' class='modal' hidden", ready)
+        self.assertIn('Are you sure? This will submit the August 2026 category totals.', ready)
+        self.assertIn("id='qb-cancel'>Cancel</button>", ready)
+        self.assertIn("id='qb-yes'", ready)
         built = summary.build_summary(app.load_statements()[AUG], app.state)
         self.assertTrue(built['ready'])
         self.assertEqual(built['summary_cents'], 1750)
@@ -317,6 +322,7 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("id='sent'>Sent for posting", done)
         self.assertIn('Oct 21, 2026 9:30 AM CT by Chris.', done)
         self.assertNotIn("id='qb-submit'", done)
+        self.assertNotIn("id='qb-confirm'", done)
         self.assertNotIn('Submit to QuickBooks for Pay', done)
 
         messages = self.qb_messages()
@@ -714,7 +720,8 @@ class SummaryTest(unittest.TestCase):
         finally:
             app.RECORD_CC = ''
         self.assertEqual(copied.status_code, 303)
-        cc_msg = email.message_from_bytes(messages[0].read_bytes())
+        latest = max(pathlib.Path(app.OUTBOX).glob('*.eml'), key=lambda p: p.stat().st_mtime_ns)
+        cc_msg = email.message_from_bytes(latest.read_bytes())
         self.assertEqual(cc_msg['To'], 'other@example.com')
         self.assertEqual(cc_msg['Cc'], 'chris@coxresearch.com')
         self.assertEqual(''.join(str(cc_msg['Subject']).splitlines()),

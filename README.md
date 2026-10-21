@@ -27,7 +27,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`. Those files use the grid amounts.
   The month folder name is `American Express charges <Month> <YYYY>` (for example `American Express charges October 2026`).
   **Submit to QuickBooks for Pay** is on this page only. It stays disabled until every cardholder has submitted and the grid sum equals the Amex statement total; otherwise the page shows a red warning with the difference.
-  Pressing it sends the grid amounts (not a fresh sum of the charges), locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`.
+  Pressing it opens an in-page dialog: "Are you sure? This will submit the &lt;Month YYYY&gt; category totals." **Yes** sends the grid amounts (not a fresh sum of the charges), locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`. **Cancel** closes the dialog and sends nothing.
   The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`).
   The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`.
   Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.

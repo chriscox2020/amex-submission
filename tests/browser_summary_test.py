@@ -143,6 +143,8 @@ with sync_playwright() as p:
     post(f'/v/{ada}/submit')
     pg.reload()
     assert pg.locator('#qb-submit').is_disabled()
+    pg.locator('#qb-submit').click(force=True)
+    assert pg.locator('#qb-confirm').is_hidden()
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
     assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
     assert pg.locator('input[data-category="Entertainment"]').input_value() == '$5.00'
@@ -181,7 +183,24 @@ with sync_playwright() as p:
     assert len([r for r in app.read_log() if r.get('kind') == 'summary_grid']) == 1
     assert pg.locator('#summary-warning').count() == 0
     assert pg.locator('#qb-submit').is_enabled()
+    assert pg.locator('#qb-confirm').is_hidden()
     pg.locator('#qb-submit').click()
+    pg.locator('#qb-confirm').wait_for(state='visible')
+    assert pg.locator('#qb-confirm-text').inner_text() == (
+        'Are you sure? This will submit the August 2026 category totals.')
+    assert pg.locator('#qb-yes').inner_text() == 'Yes'
+    assert pg.locator('#qb-cancel').inner_text() == 'Cancel'
+    pg.screenshot(path=str(shots / 'qb-confirm.png'))
+    qb_before = [r for r in app.read_log() if r['type'] == 'qb_submit']
+    pg.locator('#qb-cancel').click()
+    assert pg.locator('#qb-confirm').is_hidden()
+    assert pg.locator('#sent').count() == 0
+    assert pg.locator('#qb-submit').is_enabled()
+    assert [r for r in app.read_log() if r['type'] == 'qb_submit'] == qb_before
+    assert not any(s.startswith('QB SUBMIT:') for s in saved_subjects())
+    pg.locator('#qb-submit').click()
+    pg.locator('#qb-confirm').wait_for(state='visible')
+    pg.locator('#qb-yes').click()
     pg.locator('#sent').wait_for()
     assert pg.locator('#sent').inner_text() == 'Sent for posting'
     assert 'Oct 21, 2026 9:30 AM CT by Chris.' in pg.locator('#sent-when').inner_text()

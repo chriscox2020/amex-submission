@@ -1088,6 +1088,20 @@ function refresh() {
   }
   if (btn) btn.disabled = !!(bad || sum !== stmt || !everyone);
 }
+function openQbConfirm() {
+  var btn = document.getElementById('qb-submit');
+  var dialog = document.getElementById('qb-confirm');
+  if (!btn || !dialog || btn.disabled) return;
+  dialog.hidden = false;
+  var cancel = document.getElementById('qb-cancel');
+  if (cancel) cancel.focus();
+}
+function closeQbConfirm() {
+  var dialog = document.getElementById('qb-confirm');
+  if (dialog) dialog.hidden = true;
+  var btn = document.getElementById('qb-submit');
+  if (btn) btn.focus();
+}
 function saveGrid() {
   var form = document.getElementById('category-grid');
   if (!form) return;
@@ -1111,6 +1125,10 @@ for (var i = 0; i < gridInputs.length; i++) {
   gridInputs[i].addEventListener('input', refresh);
   gridInputs[i].addEventListener('change', saveGrid);
 }
+var qbBtn = document.getElementById('qb-submit');
+if (qbBtn) qbBtn.addEventListener('click', openQbConfirm);
+var qbCancel = document.getElementById('qb-cancel');
+if (qbCancel) qbCancel.addEventListener('click', closeQbConfirm);
 refresh();
 """
 
@@ -1134,6 +1152,13 @@ def render_summary_page(built, actor, qb):
              ".save{margin:16px 12px 0 0;font-size:16px;padding:10px 16px;background:#0b6aa2;color:#fff;border:0;border-radius:6px;cursor:pointer}",
              ".qb{margin-top:16px;font-size:18px;padding:12px 18px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}",
              ".qb:disabled{background:#9aa;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}",
+             ".modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;display:flex;align-items:center;justify-content:center}",
+             ".modal[hidden]{display:none!important}",
+             ".modal-card{background:#fff;border-radius:8px;padding:18px 20px;max-width:440px;width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.25)}",
+             ".modal-card p{margin:0 0 16px;font-size:18px;line-height:1.4}",
+             "#qb-cancel,#qb-yes{font-size:16px;padding:8px 16px;border-radius:6px;cursor:pointer}",
+             "#qb-cancel{background:#fff;border:1px solid #888;margin-right:8px}",
+             "#qb-yes{background:#0a5;color:#fff;border:0}",
              ".hint{color:#555;font-size:14px;max-width:760px}</style></head><body>",
              f"<div class='top'><h1>{esc(period['month_label'])} American Express</h1></div><div class='sheet'>",
              f"<p>Signed in as {esc(actor)}. Statement close date: {esc(period['close_date'])}.</p>",
@@ -1190,8 +1215,13 @@ def render_summary_page(built, actor, qb):
             if when:
                 parts.append(f"<p id='grid-saved'>Saved {esc(when)} by {esc(saved.get('by') or '')}.</p>")
         parts.append("<button class='save' type='submit' name='save' value='1' id='save-categories'>Save</button>")
-        parts.append(f"<button class='qb' type='submit' formaction='/admin/summary/{esc(stmt)}/qb-submit' "
-                     f"id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button></form>")
+        parts.append(f"<button class='qb' type='button' id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button>")
+        parts.append("<div id='qb-confirm' class='modal' hidden>")
+        parts.append("<div class='modal-card' role='dialog' aria-modal='true' aria-labelledby='qb-confirm-text'>")
+        parts.append(f"<p id='qb-confirm-text'>Are you sure? This will submit the {esc(period['month_label'])} category totals.</p>")
+        parts.append("<button type='button' id='qb-cancel'>Cancel</button>")
+        parts.append(f"<button class='yes' type='submit' id='qb-yes' formaction='/admin/summary/{esc(stmt)}/qb-submit'>Yes</button>")
+        parts.append("</div></div></form>")
         parts.append(f"<script>{GRID_SCRIPT}</script>")
     parts.append(f"<p><a class='dl' href='/admin/summary/{esc(stmt)}/summary.pdf'>Download PDF</a>"
                  f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.csv'>Download CSV</a>"
