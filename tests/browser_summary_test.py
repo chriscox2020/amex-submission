@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Browser check of the monthly summary page. Does not send email."""
-import json, os, pathlib, shutil, tempfile, threading, urllib.request
+import email, json, os, pathlib, shutil, tempfile, threading, urllib.request
 from base64 import b64encode
 from playwright.sync_api import sync_playwright
 
@@ -78,6 +78,24 @@ exe = shutil.which('google-chrome') or shutil.which('chromium')
 
 with sync_playwright() as p:
     browser = p.chromium.launch(executable_path=exe, args=['--no-sandbox'])
+    picker_page = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
+    picker_page.goto(BASE + f'/v/{ada}')
+    assert picker_page.locator('.banner').inner_text() == 'American Express Charges'
+    assert picker_page.locator('td.cat').nth(0).inner_text() == 'Meals and Entertainment'
+    assert picker_page.locator('td.cat').nth(1).inner_text() == 'Travel'
+    assert 'Restaurant' not in picker_page.locator('body').inner_text()
+    assert 'Merchandise' not in picker_page.locator('body').inner_text()
+    picker_page.locator('td.cat').nth(0).click()
+    picker_page.locator('.dd').wait_for(state='visible')
+    picker = picker_page.locator('.dd .ddo').all_inner_texts()
+    assert picker == ['Travel', 'Travel Fuel', 'Auto Allowance Fuel', 'Meals and Entertainment',
+                      'Supplies', 'Office Expenses Software', 'Job Materials',
+                      'Other General and Admin Expenses', 'Cancel'], picker
+    picker_page.locator('td.cat').nth(0).scroll_into_view_if_needed()
+    picker_page.screenshot(path=str(shots / 'category-picker.png'))
+    picker_page.locator('.dd .ddo.cx').click()
+    picker_page.close()
+
     desktop = browser.new_context(
         http_credentials={'username': 'Chris', 'password': 'local-admin'},
         viewport={'width': 1200, 'height': 1000},
@@ -85,12 +103,24 @@ with sync_playwright() as p:
     pg = desktop.new_page()
     pg.goto(BASE + f'/admin/summary/{AUG}')
     assert pg.locator('#summary-warning').inner_text() == (
-        'Summary total $0.00 does not equal the statement total $17.50. '
+        'Category total $0.00 does not match the Amex statement total $17.50. '
         'Difference: $17.50. Not everyone has submitted.')
+    assert pg.locator('#amex-total').inner_text() == 'Amex statement total $17.50'
     assert pg.locator('#qb-submit').is_disabled()
     assert pg.locator('#qb-submit').inner_text() == 'Submit to QuickBooks for Pay'
     assert 'Not submitted' in pg.locator('body').inner_text()
-    assert 'Merchandise & Supplies' in pg.locator('body').inner_text()
+    assert 'Merchandise' not in pg.locator('body').inner_text()
+    assert 'Restaurant' not in pg.locator('body').inner_text()
+    assert 'Office Supplies' not in pg.locator('body').inner_text()
+    grid_names = pg.locator('#category-grid input.amt').evaluate_all(
+        "els => els.map(e => e.getAttribute('data-category'))")
+    assert grid_names == ['Travel', 'Travel Fuel', 'Auto Allowance:Fuel', 'Meals and Entertainment',
+                          'Supplies', 'Office Expenses:Software', 'Job Materials',
+                          'Other General and Admin Expenses'], grid_names
+    assert pg.locator('td').filter(has_text='Auto Allowance Fuel').first.inner_text() == 'Auto Allowance Fuel'
+    assert pg.locator('td').filter(has_text='Office Expenses Software').first.inner_text() == 'Office Expenses Software'
+    assert pg.locator('input[data-category="Travel Fuel"]').input_value() == '$0.00'
+    assert pg.locator('input[data-category="Job Materials"]').input_value() == '$0.00'
     assert pg.locator('#sent').count() == 0
     with pg.expect_download() as download_info:
         pg.get_by_role('link', name='Download PDF').click()
@@ -108,6 +138,8 @@ with sync_playwright() as p:
     phone.goto(BASE + f'/admin/summary/{AUG}')
     assert phone.locator('#qb-submit').is_disabled()
     assert 'Difference: $17.50.' in phone.locator('#summary-warning').inner_text()
+    assert phone.locator('#amex-total').inner_text() == 'Amex statement total $17.50'
+    assert phone.locator('input[data-category="Meals and Entertainment"]').is_visible()
     assert 'Signed in as Meghan' in phone.locator('body').inner_text()
     phone.screenshot(path=str(shots / 'summary-waiting-mobile.png'), full_page=True)
 
@@ -115,24 +147,76 @@ with sync_playwright() as p:
     post(f'/v/{ada}/submit')
     pg.reload()
     assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
+    assert pg.locator('#qb-confirm').count() == 0
+    pg.locator('#qb-submit').click(force=True)
+    assert pg.locator('#qb-confirm').count() == 0
+    assert pg.locator('#sent').count() == 0
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
-    assert 'Not submitted' in pg.locator('tr').nth(2).inner_text()
+    assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
+    assert pg.locator('input[data-category="Meals and Entertainment"]').input_value() == '$15.00'
+    assert pg.locator('input[data-category="Supplies"]').input_value() == '-$1.00'
+    assert pg.locator('#running-sum').inner_text() == '$14.00'
+    pg.screenshot(path=str(shots / 'summary-category-grid.png'), full_page=True)
     post(f'/v/{ben}/submit')
     pg.reload()
     assert pg.locator('#summary-warning').count() == 0
-    assert pg.locator('#qb-submit').is_enabled()
-    assert 'Grand total' in pg.locator('body').inner_text()
-    assert '$17.50' in pg.locator('body').inner_text()
-    pg.locator('#qb-submit').click()
-    pg.locator('#sent').wait_for()
-    assert pg.locator('#sent').inner_text() == 'Sent for posting'
-    assert 'Oct 21, 2026 9:30 AM CT by Chris.' in pg.locator('#sent-when').inner_text()
-    assert pg.locator('#qb-submit').count() == 0
-    pg.screenshot(path=str(shots / 'summary-sent.png'), full_page=True)
+    assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
+    assert pg.locator('#running-sum').inner_text() == '$17.50'
+    assert '$17.50' in pg.locator('#amex-total').inner_text()
 
-    employee = browser.new_context(viewport={'width': 1200, 'height': 900}).new_page()
+    def saved_subjects():
+        found = []
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            msg = email.message_from_bytes(path.read_bytes())
+            found.append(''.join(str(msg['Subject']).splitlines()))
+        return found
+
+    assert not any(s.startswith('Amex summary grid SAVED:') for s in saved_subjects())
+    pg.locator('input[data-category="Travel Fuel"]').click()
+    pg.keyboard.press('Enter')
+    pg.wait_for_timeout(400)
+    assert '/admin/summary/' in pg.url
+    assert not any(s.startswith('Amex summary grid SAVED:') for s in saved_subjects())
+    pg.locator('#save-categories').click()
+    pg.locator('#grid-saved').wait_for()
+    assert pg.locator('#grid-saved').inner_text() == 'Saved Oct 21, 2026 9:30 AM CT by Chris.'
+    assert saved_subjects().count('Amex summary grid SAVED: American Express charges August 2026') == 1
+    fuel = pg.locator('input[data-category="Travel Fuel"]')
+    fuel.fill('1.00')
+    assert pg.locator('#running-sum').inner_text() == '$18.50'
+    assert 'Category total $18.50 does not match the Amex statement total $17.50.' in pg.locator('#summary-warning').inner_text()
+    assert 'Difference: -$1.00.' in pg.locator('#summary-warning').inner_text()
+    assert pg.locator('#qb-submit').is_disabled()
+    fuel.fill('$0.00')
+    fuel.blur()
+    pg.wait_for_timeout(300)
+    assert len([r for r in app.read_log() if r.get('kind') == 'summary_grid']) == 1
+    assert pg.locator('#summary-warning').count() == 0
+    assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-confirm').count() == 0
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
+    qb_before = [r for r in app.read_log() if r['type'] == 'qb_submit']
+    pg.locator('#qb-submit').click(force=True)
+    pg.wait_for_timeout(400)
+    assert pg.locator('#qb-confirm').count() == 0
+    assert pg.locator('#sent').count() == 0
+    assert pg.locator('#qb-submit').is_disabled()
+    assert [r for r in app.read_log() if r['type'] == 'qb_submit'] == qb_before
+    assert not any(s.startswith('QB SUBMIT:') for s in saved_subjects())
+    assert not any(s.startswith('American Express summary:') for s in saved_subjects())
+    pg.screenshot(path=str(shots / 'summary-qb-disabled.png'), full_page=True)
+
+    employee = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
     employee.goto(BASE + f'/v/{ada}')
     assert employee.locator('.banner').inner_text() == 'American Express Charges'
+    assert employee.locator('td.cat').count() == 0
+    assert 'Restaurant' not in employee.locator('body').inner_text()
+    assert 'Merchandise' not in employee.locator('body').inner_text()
     assert employee.locator('#qb-submit').count() == 0
     assert 'Submit to QuickBooks for Pay' not in employee.content()
     assert 'qb-submit' not in employee.content()

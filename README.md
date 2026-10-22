@@ -8,7 +8,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   The token is an HMAC of (statement, employee) with `TOKEN_SECRET` (144-bit, unguessable).
 * Page: full-width blue **American Express Charges** banner, employee name left-aligned under it, charges sorted by date. Credits are green with a minus sign and have no flag and no category edit. Footer rows are Total charges, Credits, and Net Total.
 * **Flag**: the red button opens a **Note/Reason** popup with five presets (Wrong category, Wrong price, Duplicate charge, Not my charge, Other) plus a typed note. Save stores the note, flags the row, closes the popup, and moves to the next charge. Clicking a flagged row again clears it. No page reload. Logged. A **Flagged charges** box takes one overall comment.
-* **Amex Category**: click a charge's category and pick one of Merchandise & Supplies, Transportation, Restaurant, Travel, Business Services, Other, Entertainment, Communications. A change shows in blue with the original struck through.
+* **Amex Category**: click a charge's category and pick the same QuickBooks accounts as the summary grid, in this order: Travel, Travel Fuel, Auto Allowance Fuel, Meals and Entertainment, Supplies, Office Expenses Software, Job Materials, Other General and Admin Expenses. Auto Allowance Fuel is the account `Auto Allowance:Fuel`. Office Expenses Software is `Office Expenses:Software`. A previous choice or statement category is shown as its account: Fuel as Travel Fuel, Meals and Entertainment as Meals and Entertainment, Software as Office Expenses Software, Parts & Materials as Job Materials, and anything else as Other General and Admin Expenses. A change shows in blue with the original struck through.
 * **Submit** and **Print**: Submit approves every unflagged row, locks the page, appends to the log on the persistent disk,
   and automatically emails a record (who, statement, flagged rows, approved rows, timestamp) to
   `RECORD_TO` = **littledude@mail.grokbot.com** (a leftover `littledude@coxresearch.com` value is rewritten to this address; optional `RECORD_CC`).
@@ -22,16 +22,18 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
   An employee token cannot open any of these.
 * **Monthly summary** for Chris and Meghan only: `/admin/summary` and `/admin/summary/<stmt>`
   (for example `/admin/summary/2026-09-22`). Same username and `ADMIN_PASSWORD`. The username is what a QuickBooks press records.
-  The page totals every submitted cardholder's charges by their final category (an edit wins over the statement default), lists every category and the grand total, and shows who has and has not submitted.
-  Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`.
+  One row per employee: name, total charges on the statement, and submitted or not submitted.
+  Under that, the Amex statement total, then a fixed category grid of QuickBooks accounts, in order: Travel, Travel Fuel, Auto Allowance:Fuel (shown as Auto Allowance Fuel), Meals and Entertainment, Supplies, Office Expenses:Software (shown as Office Expenses Software), Job Materials, and Other General and Admin Expenses. Each amount starts as the sum of submitted charges in that account (an employee edit wins over the statement category, and older names roll into that account) and can be typed over. The running sum updates as you type. A red warning shows when that sum does not match the Amex statement total. **Save** (`POST /admin/summary/<stmt>/categories` with `save=1`) writes `/var/data/summary-grids/<stmt>.json` and emails a record to `RECORD_TO`, the same handoff an employee Submit uses. A saved file that still uses the previous category names is shown on the new accounts, and those names are written into the file the next time it is saved. Opening the page does not rewrite the file. The subject is `Amex summary grid SAVED: American Express charges <Month> <YYYY>`. The plain-text body has who saved it, when, the statement id, the month folder, a category table (category, amount, grand total), and that same grid JSON (amounts in cents, keyed by the QuickBooks account). Typing in a box still saves on this server only and does not send that email. Pressing Enter in an amount box does not send it either. If the email fails, the failure is logged and the local file stays. An amount that is not dollars is shown on the page: "Enter each amount as dollars, such as 12.50 or -1.00." That amount is not saved.
+  Download links: `/admin/summary/<stmt>/summary.pdf`, `summary.csv`, and `summary.xlsx`. Those files use the grid amounts.
   The month folder name is `American Express charges <Month> <YYYY>` (for example `American Express charges October 2026`).
-  **Submit to QuickBooks for Pay** is on this page only. It stays disabled until every cardholder has submitted and the summary total equals the statement total; otherwise the page shows a red warning with the difference.
-  Pressing it locks the month, appends a `qb_submit` line, and saves the PDF, spreadsheet, and each submission record under `/var/data/summaries/American Express charges <Month> <YYYY>/`.
-  The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`).
-  The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`.
+  **Submit to QuickBooks for Pay** stays on this page, visible and greyed out. It is not connected. Pressing it sends no QuickBooks email, no owner summary email, and no confirmation dialog. The note under it says "Not connected yet. Enter these category totals into QuickBooks manually." Save and the PDF, CSV, and spreadsheet downloads still work. A direct post to `/admin/summary/<stmt>/qb-submit` is still the handoff used by tests: it can lock the month and send those emails. The button does not make that post.
+  Both summary POSTs (`/admin/summary/<stmt>/categories`, including the per-box autosave, and `/admin/summary/<stmt>/qb-submit`) require a per-session CSRF token. The summary page puts that token in a hidden form field, and the autosave request sends the same field. The server compares it in constant time with the token in the signed session cookie. A request whose `Origin` or `Referer` header is present and names another host is rejected. A missing or wrong token, or a foreign origin, returns 403 and does not email, write the grid file, or lock the month.
+  The summary files are named `American Express charges <Month> <YYYY> - Summary.pdf` and `.xlsx` (and `.csv`). The PDF uses the on-screen labels, so Auto Allowance:Fuel is printed as Auto Allowance Fuel and Office Expenses:Software as Office Expenses Software. The spreadsheet and the QuickBooks email still use the account names.
+  The email to `littledude@mail.grokbot.com` (dry-run writes `/var/data/outbox`) has subject `QB SUBMIT: American Express charges <Month> <YYYY>`. Its category block lists each QuickBooks account name with the amount.
+  The same confirmation also emails the month summary to `SUMMARY_TO` (default `chris@coxresearch.com, meghan@coxresearch.com`). Subject: `American Express summary: <Month YYYY>`. The body is the category table with amounts and a grand total. The summary PDF and spreadsheet are attached. That message goes to no one else: no `RECORD_TO`, no `RECORD_CC`, and no employee address, even if one is listed in `SUMMARY_TO`. An address that is not `@coxresearch.com` is dropped as well. If that send fails, the failure is logged and the month stays locked.
   Each employee's own SUBMITTED record uses that same folder name in its subject so it can be filed with the month. That record is still only an email. Employee Submit does not build this summary or send the QB email. Employee pages have no QuickBooks button and do not call Dropbox.
   Littledude creates the bill and files the attachments. This server stores no QuickBooks or Dropbox credentials and does not call either service.
-  After the month is locked, flag, category, comment, submit, and admin reset return 409.
+  After the month is locked, flag, category, comment, submit, grid edits, and admin reset return 409.
 * The email builder (`tools/make_email.py`) puts only "Open my charges" links in the email, never flag/submit links,
   because Outlook Safe Links and scanners auto-open links and would create fake flags.
 
@@ -39,7 +41,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 | Path | Purpose |
 |---|---|
 | `app.py` | Flask app (page, flag, submit, email, log, admin, monthly summary) |
-| `summary.py` | Category totals, PDF, and spreadsheet. No outside service calls |
+| `summary.py` | Category grid, PDF, and spreadsheet. No outside service calls |
 | `requirements.txt` | Flask, gunicorn, tzdata |
 | `render.yaml` | Blueprint: Starter web service + 1 GB disk at /var/data + env vars |
 | `tools/seed_sep22.py` | Builds `statements/2026-09-22.json` from the approved v5 chart (73 charges, $17,024.09) |
@@ -59,6 +61,7 @@ custom domain **`https://amex.coxresearch.com`** (GoDaddy CNAME `amex` → `amex
 | `EMAIL_MODE` | `dryrun` → `smtp` once the mail password is in | Littledude |
 | `RECORD_TO` | `littledude@mail.grokbot.com` | preset. The old `littledude@coxresearch.com` value is rewritten to this address. |
 | `RECORD_CC` | empty, or `chris@coxresearch.com` | Chris decides |
+| `SUMMARY_TO` | `chris@coxresearch.com, meghan@coxresearch.com` | preset. Blank uses this same list. Only `@coxresearch.com` addresses are used. |
 | `MAIL_FROM` | `Chris AI <littledude@coxresearch.com>` | preset |
 | `SMTP_HOST/PORT/USER` | `smtp.office365.com` / `587` / `littledude@coxresearch.com` | preset |
 | `SMTP_PASSWORD` | littledude mailbox password | **Chris, typed into the Render dashboard only** |

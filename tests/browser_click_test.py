@@ -32,9 +32,9 @@ with sync_playwright() as p:
     pg.locator('td.cat').first.click()
     pg.locator('.dd').wait_for(state='visible')
     names = pg.locator('.dd .ddo').all_inner_texts()
-    for name in ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                 'Business Services', 'Other', 'Entertainment', 'Communications', 'Cancel'):
-        assert name in names, names
+    assert names == ['Travel', 'Travel Fuel', 'Auto Allowance Fuel', 'Meals and Entertainment',
+                     'Supplies', 'Office Expenses Software', 'Job Materials',
+                     'Other General and Admin Expenses', 'Cancel'], names
     pg.locator('.dd .ddo.cx').click()
     pg.locator('.dd').wait_for(state='hidden')
 
@@ -91,13 +91,22 @@ with sync_playwright() as p:
     assert pg.locator('label[for="fcb"]').inner_text() == 'Flagged charges'
     pg.fill('#fcb', 'wrong category')
     first_cat = pg.locator('td.cat').first
+    labels = {
+        'Auto Allowance:Fuel': 'Auto Allowance Fuel',
+        'Office Expenses:Software': 'Office Expenses Software',
+    }
+    def label(name):
+        return labels.get(name, name)
     original = first_cat.get_attribute('data-orig')
+    choice = 'Office Expenses:Software' if original != 'Office Expenses:Software' else 'Travel Fuel'
     with pg.expect_response(lambda r: '/category/' in r.url and r.status == 200):
         first_cat.click()
-        pg.locator('.dd .ddo', has_text='Communications').click()
+        pg.locator('.dd .ddo', has_text=label(choice)).click()
     edited = pg.locator('td.cat').first
-    assert edited.locator('.ed-cat').inner_text() == 'Communications'
-    assert edited.locator('s.orig').inner_text() == original
+    assert edited.locator('.ed-cat').inner_text() == label(choice)
+    assert edited.get_attribute('data-cur') == choice
+    assert edited.locator('s.orig').inner_text() == label(original)
+    assert edited.get_attribute('data-orig') == original
     pg.screenshot(path='screenshots/browser-category-edit.png')
     pg.locator('button.sub').click()
     pg.wait_for_selector('.done')
@@ -107,7 +116,7 @@ with sync_playwright() as p:
     assert 'ref pending' in done
     assert 'Flagged charges: wrong category' in done
     assert pg.locator('#fcb').count() == 0
-    assert pg.locator('.ed-cat').first.inner_text() == 'Communications'
+    assert pg.locator('.ed-cat').first.inner_text() == label(choice)
     pg.screenshot(path='screenshots/browser-after-submit.png')
 
     pg.goto(links['alice-cox']['url'])

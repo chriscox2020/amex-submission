@@ -1,16 +1,53 @@
 """Monthly category summary for Chris and Meghan.
 
-This module builds the summary, the PDF, and the spreadsheet. It does not
-call QuickBooks, Dropbox, or any other outside service. Posting the bill is
-Littledude's job after the summary email arrives.
+The bill grid and the employee category picker share one category list.
+Saved edits replace the prefilled amounts. This module builds the grid, the PDF,
+and the spreadsheet. It does not call QuickBooks, Dropbox, or any other
+outside service. Posting the bill is Littledude's job after the summary email arrives.
 """
-import csv, io, json, zipfile
+import csv, io, json, re, zipfile
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                   'Business Services', 'Other', 'Entertainment', 'Communications')
-UNCATEGORIZED = 'Uncategorized'
+# QuickBooks account names, shared by the summary grid and the employee picker.
+# This order is the grid order and the picker order.
+CATEGORIES = (
+    'Travel',
+    'Travel Fuel',
+    'Auto Allowance:Fuel',
+    'Meals and Entertainment',
+    'Supplies',
+    'Office Expenses:Software',
+    'Job Materials',
+    'Other General and Admin Expenses',
+)
+ACCOUNTING_CATEGORIES = CATEGORIES
+# On-screen labels. The stored value and the QuickBooks email use CATEGORIES.
+DISPLAY_NAMES = {
+    'Auto Allowance:Fuel': 'Auto Allowance Fuel',
+    'Office Expenses:Software': 'Office Expenses Software',
+}
+# Previous list and retired Amex names. Fuel lands on Travel Fuel, not Auto Allowance.
+# Meals and Entertainment both land on Meals and Entertainment. Anything else is the last row.
+LEGACY_TO_CATEGORY = {
+    'travel': 'Travel',
+    'fuel': 'Travel Fuel',
+    'meals': 'Meals and Entertainment',
+    'entertainment': 'Meals and Entertainment',
+    'supplies': 'Supplies',
+    'software': 'Office Expenses:Software',
+    'parts & materials': 'Job Materials',
+    'other': 'Other General and Admin Expenses',
+    'restaurant': 'Meals and Entertainment',
+    'merchandise & supplies': 'Supplies',
+    'office supplies': 'Supplies',
+    'transportation': 'Other General and Admin Expenses',
+    'business services': 'Other General and Admin Expenses',
+    'communications': 'Other General and Admin Expenses',
+    'uncategorized': 'Other General and Admin Expenses',
+}
+UNCATEGORIZED = 'Other General and Admin Expenses'
+_DISPLAY_KEYS = {label.casefold(): account for account, label in DISPLAY_NAMES.items()}
 
 
 def to_cents(amount):
@@ -23,16 +60,90 @@ def format_money(cents):
     return f'{sign}${cents // 100:,}.{cents % 100:02d}'
 
 
-def final_category(row, categories):
-    """Employee edit wins. Otherwise the statement category, canonical when it matches."""
-    if isinstance(categories, dict) and row.get('id') in categories:
-        return categories[row['id']] or UNCATEGORIZED
-    raw = str(row.get('category') or '').strip()
+def display_category(name):
+    """Screen label. The QuickBooks account name is unchanged."""
+    return DISPLAY_NAMES.get(name, name)
+
+
+def lookup_category(value):
+    """A QuickBooks account name, or None when the text is blank or not a known name.
+
+    Old grid names and retired Amex names map onto the account list. Unknown text
+    is None so a typed picker value can be rejected, while the grid rolls unknowns
+    into Other General and Admin Expenses.
+    """
+    raw = str(value or '').strip()
     key = raw.casefold()
-    for name in AMEX_CATEGORIES:
+    if not key:
+        return None
+    for name in CATEGORIES:
         if name.casefold() == key:
             return name
-    return raw or UNCATEGORIZED
+    if key in _DISPLAY_KEYS:
+        return _DISPLAY_KEYS[key]
+    if key in LEGACY_TO_CATEGORY:
+        return LEGACY_TO_CATEGORY[key]
+    return None
+
+
+def grid_category_name(value):
+    """QuickBooks account for the grid and for charge display. Unknowns roll into the last row."""
+    return lookup_category(value) or UNCATEGORIZED
+
+
+def migrate_saved_amounts(saved):
+    """Old saved names become QuickBooks accounts. Amounts that share an account are added."""
+    if not saved:
+        return {}
+    out = {}
+    for name, cents in saved.items():
+        account = grid_category_name(name)
+        out[account] = out.get(account, 0) + int(cents)
+    return out
+
+
+def final_category(row, categories):
+    """Employee edit wins. Otherwise the statement category, mapped onto the shared list."""
+    if isinstance(categories, dict) and row.get('id') in categories:
+        return grid_category_name(categories[row['id']])
+    return grid_category_name(row.get('category'))
+
+
+def parse_money_cents(raw):
+    """Dollars typed into the grid, as integer cents. $ and commas are allowed."""
+    text = str('' if raw is None else raw).strip().replace('$', '').replace(',', '').replace(' ', '')
+    if not re.fullmatch(r'-?\d+(\.\d{1,2})?', text):
+        raise ValueError('bad amount')
+    sign = -1 if text.startswith('-') else 1
+    body = text[1:] if text.startswith('-') else text
+    if '.' in body:
+        whole, frac = body.split('.')
+        frac = (frac + '00')[:2]
+    else:
+        whole, frac = body, '00'
+    return sign * (int(whole) * 100 + int(frac))
+
+
+def category_grid(people, saved=None):
+    """The fixed bill grid. Submitted charges are summed into these rows only."""
+    prefill = {name: 0 for name in CATEGORIES}
+    for person in people or []:
+        if not person.get('submitted'):
+            continue
+        for charge in person.get('charges') or []:
+            name = grid_category_name(charge.get('final_category') or '')
+            prefill[name] = prefill.get(name, 0) + int(charge.get('amount_cents') or 0)
+    rows = [(name, prefill[name]) for name in CATEGORIES]
+    return resolve_grid(rows, saved)
+
+
+def resolve_grid(rows, saved):
+    """Overlay saved cents onto the fixed rows. Old saved names roll into their account."""
+    if not saved:
+        return list(rows), sum(cents for _, cents in rows)
+    overrides = migrate_saved_amounts(saved)
+    out = [(name, overrides.get(name, prefill)) for name, prefill in rows]
+    return out, sum(cents for _, cents in out)
 
 
 def statement_period(doc):
@@ -53,11 +164,9 @@ def statement_period(doc):
             'month_label': month, 'folder_label': f'American Express charges {month}'}
 
 
-def build_summary(doc, state_fn):
+def build_summary(doc, state_fn, saved=None):
     """Category totals of submitted charges only. Statement total includes everyone."""
     period = statement_period(doc)
-    buckets = {name: 0 for name in AMEX_CATEGORIES}
-    extras = {}
     people = []
     statement_cents = 0
     summary_cents = 0
@@ -81,10 +190,6 @@ def build_summary(doc, state_fn):
             })
             if submitted:
                 summary_cents += cents
-                if final in buckets:
-                    buckets[final] += cents
-                else:
-                    extras[final] = extras.get(final, 0) + cents
         people.append({
             'id': emp['id'],
             'name': emp.get('name') or emp['id'],
@@ -96,10 +201,8 @@ def build_summary(doc, state_fn):
             'flagged': list((submitted or {}).get('flagged') or []),
             'approved': list((submitted or {}).get('approved') or []),
         })
-    category_rows = [(name, buckets[name]) for name in AMEX_CATEGORIES]
-    for name in sorted(extras):
-        category_rows.append((name, extras[name]))
-    difference = statement_cents - summary_cents
+    category_rows, grid_cents = category_grid(people, saved)
+    difference = statement_cents - grid_cents
     everyone = bool(people) and all(p['submitted'] for p in people)
     return {
         'stmt': doc['stmt'],
@@ -108,6 +211,7 @@ def build_summary(doc, state_fn):
         'people': people,
         'categories': category_rows,
         'summary_cents': summary_cents,
+        'grid_cents': grid_cents,
         'statement_cents': statement_cents,
         'difference_cents': difference,
         'everyone_submitted': everyone,
@@ -116,13 +220,20 @@ def build_summary(doc, state_fn):
 
 
 def category_payload(summary):
+    categories = {}
+    accounts = []
+    for name, cents in summary['categories']:
+        amount = round(cents / 100, 2)
+        categories[name] = amount
+        accounts.append({'account': name, 'amount': amount})
     return {
         'statement': summary['stmt'],
         'close_date': summary['period']['close_date'],
         'month': summary['period']['month_label'],
         'folder': summary['period']['folder_label'],
-        'categories': {name: round(cents / 100, 2) for name, cents in summary['categories']},
-        'grand_total': round(summary['summary_cents'] / 100, 2),
+        'categories': categories,
+        'accounts': accounts,
+        'grand_total': round(summary['grid_cents'] / 100, 2),
         'statement_total': round(summary['statement_cents'] / 100, 2),
     }
 
@@ -151,12 +262,12 @@ def submission_record(summary, person):
 
 def summary_table_rows(summary):
     """Rows for the spreadsheet: categories, totals, then who submitted."""
-    rows = [['Category', 'Amount']]
+    rows = [['Category', 'QuickBooks account', 'Amount']]
     for name, cents in summary['categories']:
-        rows.append([name, f'{cents / 100:.2f}'])
-    rows.append(['Grand total', f'{summary["summary_cents"] / 100:.2f}'])
-    rows.append(['Statement total', f'{summary["statement_cents"] / 100:.2f}'])
-    rows.append(['Difference', f'{summary["difference_cents"] / 100:.2f}'])
+        rows.append([display_category(name), name, f'{cents / 100:.2f}'])
+    rows.append(['Grand total', '', f'{summary["grid_cents"] / 100:.2f}'])
+    rows.append(['Statement total', '', f'{summary["statement_cents"] / 100:.2f}'])
+    rows.append(['Difference', '', f'{summary["difference_cents"] / 100:.2f}'])
     rows.append([])
     rows.append(['Employee', 'Submitted', 'When', 'Total'])
     for person in summary['people']:
@@ -242,13 +353,13 @@ def build_pdf(summary):
         summary['period']['folder_label'],
         f"Statement close date: {summary['period']['close_date']}",
         '',
-        'Category totals (submitted charges, edited categories)',
+        'Category totals (amounts entered on the summary grid)',
     ]
     for name, cents in summary['categories']:
-        lines.append(f"{name}: {format_money(cents)}")
+        lines.append(f"{display_category(name)}: {format_money(cents)}")
     lines += [
         '',
-        f"Grand total: {format_money(summary['summary_cents'])}",
+        f"Grand total: {format_money(summary['grid_cents'])}",
         f"Statement total: {format_money(summary['statement_cents'])}",
         f"Difference: {format_money(summary['difference_cents'])}",
         '',
