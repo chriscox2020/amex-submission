@@ -1176,23 +1176,7 @@ function refresh() {
     warn.textContent = text;
     box.insertBefore(warn, box.firstChild);
   }
-  if (btn) btn.disabled = !!(bad || sum !== stmt || !everyone);
-}
-function openQbConfirm() {
-  var btn = document.getElementById('qb-submit');
-  var dialog = document.getElementById('qb-confirm');
-  if (!btn || !dialog || btn.disabled) return;
-  dialog.hidden = false;
-  var cancel = document.getElementById('qb-cancel');
-  if (cancel) cancel.focus();
-}
-function closeQbConfirm() {
-  var dialog = document.getElementById('qb-confirm');
-  if (dialog) dialog.hidden = true;
-  var yes = document.getElementById('qb-yes');
-  if (yes) yes.disabled = false;
-  var btn = document.getElementById('qb-submit');
-  if (btn) btn.focus();
+  if (btn) btn.disabled = true;
 }
 function showAmountError(message) {
   var box = document.getElementById('grid-note');
@@ -1246,14 +1230,7 @@ for (var i = 0; i < gridInputs.length; i++) {
   gridInputs[i].addEventListener('change', saveGrid);
 }
 var qbBtn = document.getElementById('qb-submit');
-if (qbBtn) qbBtn.addEventListener('click', openQbConfirm);
-var qbCancel = document.getElementById('qb-cancel');
-if (qbCancel) qbCancel.addEventListener('click', closeQbConfirm);
-var qbYes = document.getElementById('qb-yes');
-if (qbYes) qbYes.addEventListener('click', function() {
-  var btn = this;
-  setTimeout(function() { btn.disabled = true; }, 0);
-});
+if (qbBtn) qbBtn.disabled = true;
 refresh();
 """
 
@@ -1276,7 +1253,8 @@ def render_summary_page(built, actor, qb, amount_error='', already_sent=False):
              "#running-sum{font-weight:bold;font-size:18px}",
              ".save{margin:16px 12px 0 0;font-size:16px;padding:10px 16px;background:#0b6aa2;color:#fff;border:0;border-radius:6px;cursor:pointer}",
              ".qb{margin-top:16px;font-size:18px;padding:12px 18px;background:#0a5;color:#fff;border:0;border-radius:6px;cursor:pointer}",
-             ".qb:disabled{background:#9aa;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}",
+             ".qb:disabled{background:#9aa;color:#fff;cursor:default}a.dl{display:inline-block;margin:12px 16px 0 0}",
+             ".qb-note{margin:10px 0 0;max-width:760px;font-weight:bold}",
              ".modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;display:flex;align-items:center;justify-content:center}",
              ".modal[hidden]{display:none!important}",
              ".modal-card{background:#fff;border-radius:8px;padding:18px 20px;max-width:440px;width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.25)}",
@@ -1302,7 +1280,7 @@ def render_summary_page(built, actor, qb, amount_error='', already_sent=False):
     parts.append("</table><h2>Categories</h2>")
     parts.append("<p class='hint'>Amounts start from submitted charges. Edit any row by hand. "
                  "Save keeps the amounts for this statement and emails that grid. "
-                 "Typing in a box saves here only. Submit sends these amounts.</p>")
+                 "Typing in a box saves here only.</p>")
     if qb:
         when = esc(nice(qb['ts'])) if qb.get('ts') else ''
         parts.append(f"<p class='amex-total' id='amex-total' data-cents='{built['statement_cents']}'>"
@@ -1316,7 +1294,6 @@ def render_summary_page(built, actor, qb, amount_error='', already_sent=False):
         parts.append(f"<p class='sent' id='sent'>Sent for posting</p><p id='sent-when'>{when} by {esc(qb.get('by') or '')}.</p>")
     else:
         everyone = '1' if built['everyone_submitted'] else '0'
-        disabled = '' if built['ready'] else ' disabled'
         parts.append(f"<form id='category-grid' data-everyone='{everyone}' method='post' "
                      f"action='/admin/summary/{esc(stmt)}/categories' autocomplete='off'>")
         parts.append(f"<input type='hidden' name='csrf' value='{esc(summary_csrf_token())}'>")
@@ -1345,13 +1322,9 @@ def render_summary_page(built, actor, qb, amount_error='', already_sent=False):
             if when:
                 parts.append(f"<p id='grid-saved'>Saved {esc(when)} by {esc(saved.get('by') or '')}.</p>")
         parts.append("<button class='save' type='submit' name='save' value='1' id='save-categories'>Save</button>")
-        parts.append(f"<button class='qb' type='button' id='qb-submit'{disabled}>Submit to QuickBooks for Pay</button>")
-        parts.append("<div id='qb-confirm' class='modal' hidden>")
-        parts.append("<div class='modal-card' role='dialog' aria-modal='true' aria-labelledby='qb-confirm-text'>")
-        parts.append(f"<p id='qb-confirm-text'>Are you sure? This will submit the {esc(period['month_label'])} category totals.</p>")
-        parts.append("<button type='button' id='qb-cancel'>Cancel</button>")
-        parts.append(f"<button class='yes' type='submit' id='qb-yes' formaction='/admin/summary/{esc(stmt)}/qb-submit'>Yes</button>")
-        parts.append("</div></div></form>")
+        parts.append("<button class='qb' type='button' id='qb-submit' disabled>Submit to QuickBooks for Pay</button>")
+        parts.append("<p class='qb-note' id='qb-note'>Not connected yet. Enter these category totals into QuickBooks manually.</p>")
+        parts.append("</form>")
         parts.append(f"<script>{GRID_SCRIPT}</script>")
     parts.append(f"<p><a class='dl' href='/admin/summary/{esc(stmt)}/summary.pdf'>Download PDF</a>"
                  f"<a class='dl' href='/admin/summary/{esc(stmt)}/summary.csv'>Download CSV</a>"

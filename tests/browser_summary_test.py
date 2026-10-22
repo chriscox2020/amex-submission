@@ -147,8 +147,12 @@ with sync_playwright() as p:
     post(f'/v/{ada}/submit')
     pg.reload()
     assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
+    assert pg.locator('#qb-confirm').count() == 0
     pg.locator('#qb-submit').click(force=True)
-    assert pg.locator('#qb-confirm').is_hidden()
+    assert pg.locator('#qb-confirm').count() == 0
+    assert pg.locator('#sent').count() == 0
     assert 'Difference: $3.50.' in pg.locator('#summary-warning').inner_text()
     assert 'Not submitted' in pg.locator('#cardholders tr').nth(2).inner_text()
     assert pg.locator('input[data-category="Meals and Entertainment"]').input_value() == '$15.00'
@@ -158,7 +162,9 @@ with sync_playwright() as p:
     post(f'/v/{ben}/submit')
     pg.reload()
     assert pg.locator('#summary-warning').count() == 0
-    assert pg.locator('#qb-submit').is_enabled()
+    assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
     assert pg.locator('#running-sum').inner_text() == '$17.50'
     assert '$17.50' in pg.locator('#amex-total').inner_text()
 
@@ -190,57 +196,20 @@ with sync_playwright() as p:
     pg.wait_for_timeout(300)
     assert len([r for r in app.read_log() if r.get('kind') == 'summary_grid']) == 1
     assert pg.locator('#summary-warning').count() == 0
-    assert pg.locator('#qb-submit').is_enabled()
-    assert pg.locator('#qb-confirm').is_hidden()
-    pg.locator('#qb-submit').click()
-    pg.locator('#qb-confirm').wait_for(state='visible')
-    assert pg.locator('#qb-confirm-text').inner_text() == (
-        'Are you sure? This will submit the August 2026 category totals.')
-    assert pg.locator('#qb-yes').inner_text() == 'Yes'
-    assert pg.locator('#qb-cancel').inner_text() == 'Cancel'
-    assert pg.locator('#qb-yes').is_enabled()
-    yes_disabled = pg.evaluate("""() => new Promise(resolve => {
-      const btn = document.getElementById('qb-yes');
-      const form = btn.form;
-      function stop(ev) {
-        if (ev.submitter && ev.submitter.id === 'qb-yes') {
-          ev.preventDefault();
-          form.removeEventListener('submit', stop);
-          setTimeout(() => resolve(btn.disabled), 50);
-        }
-      }
-      form.addEventListener('submit', stop);
-      btn.click();
-    })""")
-    assert yes_disabled is True
-    pg.locator('#qb-yes').evaluate('btn => { btn.disabled = false }')
-    pg.screenshot(path=str(shots / 'qb-confirm.png'))
+    assert pg.locator('#qb-submit').is_disabled()
+    assert pg.locator('#qb-confirm').count() == 0
+    assert pg.locator('#qb-note').inner_text() == (
+        'Not connected yet. Enter these category totals into QuickBooks manually.')
     qb_before = [r for r in app.read_log() if r['type'] == 'qb_submit']
-    pg.locator('#qb-cancel').click()
-    assert pg.locator('#qb-confirm').is_hidden()
+    pg.locator('#qb-submit').click(force=True)
+    pg.wait_for_timeout(400)
+    assert pg.locator('#qb-confirm').count() == 0
     assert pg.locator('#sent').count() == 0
-    assert pg.locator('#qb-submit').is_enabled()
+    assert pg.locator('#qb-submit').is_disabled()
     assert [r for r in app.read_log() if r['type'] == 'qb_submit'] == qb_before
     assert not any(s.startswith('QB SUBMIT:') for s in saved_subjects())
     assert not any(s.startswith('American Express summary:') for s in saved_subjects())
-    pg.locator('#qb-submit').click()
-    pg.locator('#qb-confirm').wait_for(state='visible')
-    pg.locator('#qb-yes').click()
-    pg.locator('#sent').wait_for()
-    assert pg.locator('#sent').inner_text() == 'Sent for posting'
-    assert 'Oct 21, 2026 9:30 AM CT by Chris.' in pg.locator('#sent-when').inner_text()
-    assert pg.locator('#qb-submit').count() == 0
-    owner_mail = []
-    for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
-        msg = email.message_from_bytes(path.read_bytes())
-        if ''.join(str(msg['Subject']).splitlines()) == 'American Express summary: August 2026':
-            owner_mail.append(msg)
-    assert len(owner_mail) == 1, saved_subjects()
-    assert owner_mail[0]['To'] == 'chris@coxresearch.com, meghan@coxresearch.com'
-    assert owner_mail[0]['Cc'] is None
-    assert 'ada@' not in str(owner_mail[0]['To'])
-    assert 'ben@' not in str(owner_mail[0]['To'])
-    pg.screenshot(path=str(shots / 'summary-sent.png'), full_page=True)
+    pg.screenshot(path=str(shots / 'summary-qb-disabled.png'), full_page=True)
 
     employee = browser.new_context(viewport={'width': 1100, 'height': 900}).new_page()
     employee.goto(BASE + f'/v/{ada}')
