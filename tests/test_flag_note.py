@@ -628,8 +628,8 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.normalize_record_to(''), 'littledude@mail.grokbot.com')
         self.assertEqual(app.normalize_record_to('other@example.com'), 'other@example.com')
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()).lower()
-        for banned in ('intuit.com', 'americanexpress.com', 'api.amex', 'api.dropbox',
-                       'dropbox_token', 'dropbox_app_secret', 'quickbooks_client', 'quickbooks_secret'):
+        for banned in ('intuit.com', 'americanexpress.com', 'api.amex', 'files/delete',
+                       'permanently_delete', 'create_shared_link', 'quickbooks_client', 'quickbooks_secret'):
             self.assertNotIn(banned, src)
         self.assertNotIn('Submit to QuickBooks for Pay', self.page())
         self.assertNotIn('/qb-submit', self.page())

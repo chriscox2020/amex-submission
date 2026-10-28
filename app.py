@@ -10,7 +10,7 @@ One page per employee per statement, reached by an unguessable token link.
            reference (or "ref pending"), then the note.
 Charge review stays in this app. An employee's Submit writes the log and the record email only.
 Chris and Meghan have a separate summary page. Sending that summary emails Littledude.
-This server does not call QuickBooks or Dropbox.
+This server does not call QuickBooks. Employee submit can file a copy of that submission to Dropbox.
 """
 import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
 from datetime import datetime
@@ -352,9 +352,9 @@ def flag_comment_line(comment):
     if not comment: return ''
     return 'Flagged charges: ' + comment
 
-def record_email(doc, e, flagged, approved, ts, comment=''):
+def record_email(doc, e, flagged, approved, ts, comment='', dropbox_failed=False):
     # The month folder name lets Littledude file this record. This email does not
-    # upload anywhere and does not call QuickBooks or Dropbox.
+    # upload the files itself. A Dropbox failure is one extra line, nothing else changes.
     folder = summary.statement_period(doc)['folder_label']
     subj = f"Amex verification SUBMITTED: {e['name']} - {folder} - {len(flagged)} flagged"
     def tbl(rows):
@@ -375,11 +375,13 @@ def record_email(doc, e, flagged, approved, ts, comment=''):
             f"(statement {doc['stmt']}) on {nice(ts)}.</p>"
             f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{flag_html(flagged)}{comment_html}"
             f"<p><b>Approved ({len(approved)}, {money(at)}):</b></p>{tbl(approved)}"
-            f"<p style='color:#777;font-size:12px'>Automatic record from {PUBLIC_BASE}. Saved to the log on the server.</p></div>")
+            f"<p style='color:#777;font-size:12px'>Automatic record from {PUBLIC_BASE}. Saved to the log on the server.</p>"
+            f"{'<p>Dropbox filing failed</p>' if dropbox_failed else ''}</div>")
     text = (f"{e['name']} submitted {doc['label']} ({doc['stmt']}) at {ts}.\nFlagged ({len(flagged)}, {money(ft)}):\n" +
             ''.join(f"  {flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))}\n" for r in flagged) +
             comment_text +
-            f"Approved ({len(approved)}, {money(at)}).\n")
+            f"Approved ({len(approved)}, {money(at)}).\n" +
+            ('Dropbox filing failed\n' if dropbox_failed else ''))
     return subj, body, text
 
 def send_prepared(msg):
@@ -492,6 +494,166 @@ def send_submit_confirm(doc, emp, rows, ts):
     msg['To'] = addr
     msg.set_content(submit_confirm_text(doc, rows, ts))
     return send_prepared(msg)
+
+DROPBOX_ROOT = "/Chris's AI/American Express charges"
+DROPBOX_FAIL_LINE = 'Dropbox filing failed'
+
+def dropbox_credentials():
+    key = os.environ.get('DROPBOX_APP_KEY', '').strip()
+    secret = os.environ.get('DROPBOX_APP_SECRET', '').strip()
+    refresh = os.environ.get('DROPBOX_REFRESH_TOKEN', '').strip()
+    if not key or not secret or not refresh:
+        raise RuntimeError('missing Dropbox env')
+    return key, secret, refresh
+
+def dropbox_call(url, data, headers):
+    """One Dropbox HTTP POST. Tests replace this. Never used for sharing or delete."""
+    import urllib.request
+    req = urllib.request.Request(url, data=data, method='POST', headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read()
+
+def dropbox_access_token():
+    """Exchange the refresh token for a short-lived access token. The refresh token is not reused as a bearer."""
+    import urllib.parse
+    key, secret, refresh = dropbox_credentials()
+    body = urllib.parse.urlencode({
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh,
+        'client_id': key,
+        'client_secret': secret,
+    }).encode()
+    raw = dropbox_call('https://api.dropboxapi.com/oauth2/token', body, {
+        'Content-Type': 'application/x-www-form-urlencoded',
+    })
+    token = json.loads(raw.decode()).get('access_token')
+    if not token:
+        raise RuntimeError('Dropbox token response had no access_token')
+    return token
+
+def dropbox_upload(token, path, content):
+    """files/upload with mode add and autorename. An existing name is kept; this file is renamed, never overwritten."""
+    arg = json.dumps({
+        'path': path,
+        'mode': {'.tag': 'add'},
+        'autorename': True,
+        'mute': True,
+    })
+    dropbox_call('https://content.dropboxapi.com/2/files/upload', content, {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/octet-stream',
+        'Dropbox-API-Arg': arg,
+    })
+
+def closing_folder_name(doc):
+    """'October 22' from the statement closing date."""
+    close = summary.statement_period(doc)['close_date']
+    dt = datetime.strptime(close, '%Y-%m-%d')
+    return dt.strftime('%B %-d')
+
+def submitted_file_stamp(ts):
+    dt = datetime.fromisoformat(str(ts))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    return dt.astimezone(TZ).strftime('%Y-%m-%d %H%M') + ' CT'
+
+def dropbox_segment(name):
+    cleaned = str(name or '').replace('/', '-').replace('\\', '-').strip()
+    return cleaned or 'Employee'
+
+def employee_file_base(emp_name, month_label, ts):
+    return f"{emp_name} - Amex {month_label} - submitted {submitted_file_stamp(ts)}"
+
+def employee_packet_lines(emp, rows, ts, comment, month_label):
+    lines = [
+        str(emp.get('name') or ''),
+        f"Amex {month_label}",
+        f"Submitted {submitted_file_stamp(ts)}",
+        '',
+        'Date | Merchant | Amount | Category | Flag | Reason | Note',
+    ]
+    flagged_total = 0.0
+    approved_total = 0.0
+    for r in rows:
+        status = 'flagged' if r.get('flag_status') == 'flagged' else 'approved'
+        amount = float(r.get('amount') or 0)
+        if status == 'flagged':
+            flagged_total += amount
+        else:
+            approved_total += amount
+        reason = r.get('note') or ''
+        lines.append(' | '.join([
+            str(r.get('date') or ''),
+            str(r.get('company') or ''),
+            money(amount),
+            str(r.get('amex_category') or r.get('category') or ''),
+            status,
+            reason,
+            '',
+        ]))
+    lines += [
+        '',
+        f"Flagged total: {money(flagged_total)}",
+        f"Approved total: {money(approved_total)}",
+        f"Total: {money(flagged_total + approved_total)}",
+        f"Note: {comment or ''}",
+    ]
+    return lines
+
+def employee_packet_rows(emp, rows, ts, comment, month_label):
+    table = [['Date', 'Merchant', 'Amount', 'Category', 'Flag', 'Reason', 'Note']]
+    flagged_total = 0.0
+    approved_total = 0.0
+    for r in rows:
+        status = 'flagged' if r.get('flag_status') == 'flagged' else 'approved'
+        amount = float(r.get('amount') or 0)
+        if status == 'flagged':
+            flagged_total += amount
+        else:
+            approved_total += amount
+        table.append([
+            str(r.get('date') or ''),
+            str(r.get('company') or ''),
+            f'{amount:.2f}',
+            str(r.get('amex_category') or r.get('category') or ''),
+            status,
+            r.get('note') or '',
+            '',
+        ])
+    table += [
+        [],
+        ['Flagged total', f'{flagged_total:.2f}'],
+        ['Approved total', f'{approved_total:.2f}'],
+        ['Total', f'{flagged_total + approved_total:.2f}'],
+        ['Note', comment or ''],
+        ['Submitted', submitted_file_stamp(ts)],
+        ['Employee', str(emp.get('name') or '')],
+        ['Statement month', month_label],
+    ]
+    return table
+
+def file_submission_to_dropbox(doc, emp, rows, ts, comment=''):
+    """Upload this employee's PDF and xlsx, and the statement combined chart.
+    files/upload mode add + autorename. Never overwrite, never share, never delete.
+    """
+    token = dropbox_access_token()
+    closing = closing_folder_name(doc)
+    month = summary.statement_period(doc)['month_label']
+    person = dropbox_segment(emp.get('name'))
+    # files/upload creates missing parent folders. Employee files sit under the closing date.
+    folder = f"{DROPBOX_ROOT}/{closing}/{person}"
+    base = employee_file_base(emp.get('name') or person, month, ts)
+    pdf = summary.pdf_from_lines(employee_packet_lines(emp, rows, ts, comment, month))
+    xlsx = summary.table_xlsx(employee_packet_rows(emp, rows, ts, comment, month))
+    dropbox_upload(token, f'{folder}/{base}.pdf', pdf)
+    dropbox_upload(token, f'{folder}/{base}.xlsx', xlsx)
+    # The combined chart stays at the top of American Express charges, not in the closing-date folder.
+    built = summary.build_summary(doc, state)
+    chart = f'Combined chart - Amex {month}'
+    dropbox_upload(token, f'{DROPBOX_ROOT}/{chart}.pdf', summary.build_pdf(built))
+    dropbox_upload(token, f'{DROPBOX_ROOT}/{chart}.xlsx', summary.build_xlsx(built))
+    return {'folder': folder, 'chart_folder': DROPBOX_ROOT,
+            'files': [base + '.pdf', base + '.xlsx', chart + '.pdf', chart + '.xlsx']}
 
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
@@ -913,8 +1075,31 @@ def submit(token):
                  'flagged_total': round(sum(r['amount'] for r in flagged), 2),
                  'approved_total': round(sum(r['amount'] for r in approved), 2), 'comment': comment}
           append(rec)
+          packet = []
+          flagged_ids = {r['id'] for r in flagged}
+          approved_ids = {r['id'] for r in approved}
+          by_flag = {r['id']: r for r in flagged}
+          by_approved = {r['id']: r for r in approved}
+          for source in sorted_rows(e.get('rows') or []):
+              item = by_flag.get(source['id']) or by_approved.get(source['id'])
+              if not item:
+                  continue
+              item['flag_status'] = 'flagged' if source['id'] in flagged_ids else 'approved'
+              if source['id'] in approved_ids:
+                  item.setdefault('note', '')
+              packet.append(item)
+          dropbox_failed = False
           try:
-              status = send_email(*record_email(doc, e, flagged, approved, rec['ts'], comment))
+              file_submission_to_dropbox(doc, e, packet, rec['ts'], comment)
+              append({'type': 'dropbox_file', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
+                      'ts': now(), 'status': 'ok'})
+          except Exception as ex:
+              dropbox_failed = True
+              append({'type': 'dropbox_file', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
+                      'ts': now(), 'status': 'Dropbox filing failed: ' + f'{type(ex).__name__}: {ex}'})
+          try:
+              status = send_email(*record_email(doc, e, flagged, approved, rec['ts'], comment,
+                                                dropbox_failed=dropbox_failed))
           except Exception as ex:
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
@@ -1057,6 +1242,46 @@ def admin_upload():
         json.dump(doc, fh, indent=1)
         fh.write('\n')
     return jsonify(ok=True, stmt=doc['stmt'], employees=len(doc['employees']))
+
+def _packet_for_submission(doc, emp):
+    """Rows for a submission already on the log, in statement order, with the category as submitted."""
+    flags, sub, comment, categories = state(doc['stmt'], emp['id'])
+    if not sub:
+        return None, None, None
+    flagged_ids = set(sub.get('flagged') or [])
+    packet = []
+    for source in sorted_rows(emp.get('rows') or []):
+        item = dict(source)
+        item['amex_category'] = chosen_category(source, categories)
+        item['flag_status'] = 'flagged' if source['id'] in flagged_ids else 'approved'
+        info = flag_meta(flags, source['id']) if source['id'] in flagged_ids else {}
+        item['note'] = info.get('note') or ''
+        packet.append(item)
+    return packet, sub.get('ts'), comment
+
+@app.post('/admin/dropbox/<stmt>/<emp_id>')
+def admin_dropbox_refile(stmt, emp_id):
+    """Re-file one existing submission. Chris or Meghan only. Does not email again."""
+    need_admin()
+    doc = load_statements().get(stmt)
+    if not doc:
+        return jsonify(error='unknown statement'), 404
+    emp = next((e for e in doc.get('employees') or [] if e.get('id') == emp_id), None)
+    if not emp:
+        return jsonify(error='unknown employee'), 404
+    packet, ts, comment = _packet_for_submission(doc, emp)
+    if packet is None:
+        return jsonify(error='not submitted'), 409
+    try:
+        filed = file_submission_to_dropbox(doc, emp, packet, ts, comment or '')
+    except Exception as ex:
+        detail = f'{type(ex).__name__}: {ex}'
+        append({'type': 'dropbox_file', 'stmt': stmt, 'emp_id': emp_id, 'emp': emp.get('name'),
+                'ts': now(), 'status': 'Dropbox filing failed: ' + detail, 'refile': True})
+        return jsonify(error='Dropbox filing failed', detail=detail), 502
+    append({'type': 'dropbox_file', 'stmt': stmt, 'emp_id': emp_id, 'emp': emp.get('name'),
+            'ts': now(), 'status': 'ok', 'refile': True})
+    return jsonify(ok=True, **filed)
 
 @app.post('/admin/reset/<stmt>/<emp_id>')
 def admin_reset(stmt, emp_id):
