@@ -655,6 +655,137 @@ def file_submission_to_dropbox(doc, emp, rows, ts, comment=''):
     return {'folder': folder, 'chart_folder': DROPBOX_ROOT,
             'files': [base + '.pdf', base + '.xlsx', chart + '.pdf', chart + '.xlsx']}
 
+def statement_all_submitted(doc):
+    """True only when every employee on this statement has a submit record. Count comes from the statement."""
+    employees = (doc or {}).get('employees') or []
+    if not employees:
+        return False
+    for emp in employees:
+        _flags, sub, _comment, _categories = state(doc['stmt'], emp['id'])
+        if not sub:
+            return False
+    return True
+
+def combined_chart_auto_done(stmt):
+    for rec in read_log():
+        if (rec.get('type') == 'combined_chart' and rec.get('stmt') == stmt
+                and rec.get('status') == 'ok' and not rec.get('manual')):
+            return True
+    return False
+
+def final_chart_tables(doc):
+    """QuickBooks-entry matrix. Credits keep their sign and net into the category."""
+    people = []
+    for emp in doc.get('employees') or []:
+        flags, sub, _comment, categories = state(doc['stmt'], emp['id'])
+        if not sub:
+            continue
+        flagged_ids = set(sub.get('flagged') or [])
+        charges = []
+        for source in sorted_rows(emp.get('rows') or []):
+            amount = float(source.get('amount') or 0)
+            charges.append({
+                'employee': emp.get('name') or emp['id'],
+                'date': source.get('date') or '',
+                'merchant': source.get('company') or '',
+                'amount': amount,
+                'category': chosen_category(source, categories) or str(source.get('category') or '') or 'Uncategorized',
+                'flag': 'flagged' if source.get('id') in flagged_ids else 'approved',
+                'reason': (flag_meta(flags, source.get('id')) or {}).get('note') or '',
+            })
+        people.append({'name': emp.get('name') or emp['id'], 'charges': charges})
+    names = [p['name'] for p in people]
+    extras = []
+    known = set(summary.AMEX_CATEGORIES)
+    for person in people:
+        for charge in person['charges']:
+            if charge['category'] not in known:
+                known.add(charge['category'])
+                extras.append(charge['category'])
+    categories = list(summary.AMEX_CATEGORIES) + extras
+    header = ['Category'] + names + ['Grand total']
+    matrix = [header]
+    col_totals = [0.0 for _ in names]
+    for cat in categories:
+        values = []
+        row_sum = 0.0
+        for i, person in enumerate(people):
+            amount = sum(c['amount'] for c in person['charges'] if c['category'] == cat)
+            values.append(f'{amount:.2f}')
+            col_totals[i] += amount
+            row_sum += amount
+        matrix.append([cat] + values + [f'{row_sum:.2f}'])
+    matrix.append(['Grand total'] + [f'{total:.2f}' for total in col_totals] + [f'{sum(col_totals):.2f}'])
+    employee_rows = [['Employee', 'Total']]
+    for i, person in enumerate(people):
+        employee_rows.append([person['name'], f'{col_totals[i]:.2f}'])
+    employee_rows.append(['Grand total', f'{sum(col_totals):.2f}'])
+    detail = [['Employee', 'Date', 'Merchant', 'Amount', 'Category', 'Flag', 'Reason']]
+    for person in people:
+        for charge in person['charges']:
+            detail.append([
+                charge['employee'], charge['date'], charge['merchant'], f"{charge['amount']:.2f}",
+                charge['category'], charge['flag'], charge['reason'],
+            ])
+    return matrix, employee_rows, detail
+
+def final_chart_base(doc, ts):
+    month = summary.statement_period(doc)['month_label']
+    return f"Combined - Amex {month} - all submitted {submitted_file_stamp(ts)}"
+
+def file_final_combined_chart(doc, ts):
+    """PDF and spreadsheet at the top of American Express charges. Never overwrites."""
+    token = dropbox_access_token()
+    matrix, employees, detail = final_chart_tables(doc)
+    month = summary.statement_period(doc)['month_label']
+    base = final_chart_base(doc, ts)
+    lines = [f'Combined QuickBooks chart - {month}', f'All submitted {submitted_file_stamp(ts)}', '',
+             'Category totals']
+    for row in matrix:
+        lines.append(' | '.join(str(cell) for cell in row))
+    lines += ['', 'Per-employee totals']
+    for row in employees:
+        lines.append(' | '.join(str(cell) for cell in row))
+    lines += ['', 'Every charge']
+    for row in detail:
+        lines.append(' | '.join(str(cell) for cell in row))
+    pdf = summary.pdf_from_lines(lines)
+    xlsx = summary.workbook_xlsx([
+        ('Categories', matrix),
+        ('Employees', employees),
+        ('Charges', detail),
+    ])
+    dropbox_upload(token, f'{DROPBOX_ROOT}/{base}.pdf', pdf)
+    dropbox_upload(token, f'{DROPBOX_ROOT}/{base}.xlsx', xlsx)
+    return base
+
+def send_combined_ready(doc, ts):
+    month = summary.statement_period(doc)['month_label']
+    text = (f"The combined QuickBooks chart for {month} is ready.\n"
+            f"All employees have submitted. {submitted_file_stamp(ts)}.\n"
+            f"Folder: {DROPBOX_ROOT}\n"
+            "This note does not write to QuickBooks.\n")
+    body = '<p>' + html.escape(text).replace('\n', '<br>') + '</p>'
+    return send_email(f'Combined Amex chart is ready: {month}', body, text)
+
+def maybe_file_final_chart(doc, ts):
+    """Once, when this statement's last employee submits. Failures are logged and do not raise."""
+    if not statement_all_submitted(doc) or combined_chart_auto_done(doc['stmt']):
+        return
+    try:
+        file_final_combined_chart(doc, ts)
+    except Exception as ex:
+        append({'type': 'combined_chart', 'stmt': doc['stmt'], 'ts': now(),
+                'status': f'error: {type(ex).__name__}: {ex}'})
+        return
+    append({'type': 'combined_chart', 'stmt': doc['stmt'], 'ts': now(), 'status': 'ok'})
+    try:
+        status = send_combined_ready(doc, ts)
+    except Exception as ex:
+        status = f'error: {type(ex).__name__}: {ex}'
+    append({'type': 'combined_chart_email', 'stmt': doc['stmt'], 'ts': now(),
+            'to': RECORD_TO, 'status': status})
+
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
 .banner{background:#006fcf;color:#fff;font-size:44px;font-weight:bold;text-align:center;padding:22px 12px;margin:0 0 18px;width:100%;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
@@ -1121,6 +1252,8 @@ def submit(token):
                   freview = f'error: {type(ex).__name__}: {ex}'
               append({'type': 'flag_review_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
                       'ts': now(), 'to': addr, 'count': len(flagged), 'status': freview})
+          # After the emails. Only the submit that completes the statement files the final chart.
+          maybe_file_final_chart(doc, rec['ts'])
     return redirect(f'/v/{token}', 303)
 
 @app.post('/v/<token>/comment')
@@ -1282,6 +1415,29 @@ def admin_dropbox_refile(stmt, emp_id):
     append({'type': 'dropbox_file', 'stmt': stmt, 'emp_id': emp_id, 'emp': emp.get('name'),
             'ts': now(), 'status': 'ok', 'refile': True})
     return jsonify(ok=True, **filed)
+
+@app.post('/admin/combined/<stmt>')
+def admin_combined_chart(stmt):
+    """Regenerate the final combined chart. Chris or Meghan only. Does not write to QuickBooks."""
+    need_admin()
+    doc = load_statements().get(stmt)
+    if not doc:
+        return jsonify(error='unknown statement'), 404
+    if not statement_all_submitted(doc):
+        return jsonify(error='not ready'), 409
+    try:
+        base = file_final_combined_chart(doc, now())
+    except Exception as ex:
+        detail = f'{type(ex).__name__}: {ex}'
+        append({'type': 'combined_chart', 'stmt': stmt, 'ts': now(), 'status': 'error: ' + detail, 'manual': True})
+        return jsonify(error='Dropbox filing failed', detail=detail), 502
+    append({'type': 'combined_chart', 'stmt': stmt, 'ts': now(), 'status': 'ok', 'manual': True})
+    try:
+        status = send_combined_ready(doc, now())
+    except Exception as ex:
+        status = f'error: {type(ex).__name__}: {ex}'
+    append({'type': 'combined_chart_email', 'stmt': stmt, 'ts': now(), 'to': RECORD_TO, 'status': status, 'manual': True})
+    return jsonify(ok=True, file=base)
 
 @app.post('/admin/reset/<stmt>/<emp_id>')
 def admin_reset(stmt, emp_id):
