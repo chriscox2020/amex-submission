@@ -90,7 +90,7 @@ with sync_playwright() as p:
     assert pg.locator('#qb-submit').is_disabled()
     assert pg.locator('#qb-submit').inner_text() == 'Submit to QuickBooks for Pay'
     assert 'Not submitted' in pg.locator('body').inner_text()
-    assert 'Merchandise & Supplies' in pg.locator('body').inner_text()
+    assert 'Office Expenses' in pg.locator('body').inner_text()
     assert pg.locator('#sent').count() == 0
     with pg.expect_download() as download_info:
         pg.get_by_role('link', name='Download PDF').click()
@@ -111,7 +111,7 @@ with sync_playwright() as p:
     assert 'Signed in as Meghan' in phone.locator('body').inner_text()
     phone.screenshot(path=str(shots / 'summary-waiting-mobile.png'), full_page=True)
 
-    post(f'/v/{ada}/category/2', {'category': 'Entertainment'})
+    post(f'/v/{ada}/category/2', {'category': 'Gift'})
     post(f'/v/{ada}/submit')
     pg.reload()
     assert pg.locator('#qb-submit').is_disabled()

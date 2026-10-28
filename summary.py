@@ -8,14 +8,8 @@ import csv, io, json, zipfile
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-AMEX_CATEGORIES = ('Supplies', 'Job Materials', 'Utilities', 'Office Expenses',
-                   'Office Expenses:Software', 'Office Expenses:Computers & other office equipment',
-                   'Dues & Subscriptions', 'Auto Allowance:Fuel', 'Auto Maintenance',
-                   'Shipping, Delivery Expense', 'Freight & Delivery', 'Meals and Entertainment',
-                   'Travel', 'Travel Fuel', 'Travel:Flights', 'Travel Meals', 'Travel:Parking',
-                   'Advertising/Promotional:Promotional Items', 'Advertising/Promotional:Trade Show',
-                   'Advertising/Promotional:Website', 'Advertising/Promotional:Promotional Meals',
-                   'Repair & Maintenance', 'Gift', 'Equipment Rental', 'Other')
+AMEX_CATEGORIES = ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
+                   'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance')
 UNCATEGORIZED = 'Uncategorized'
 
 

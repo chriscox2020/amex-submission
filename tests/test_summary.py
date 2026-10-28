@@ -343,7 +343,7 @@ class SummaryTest(unittest.TestCase):
                                    headers={'Accept': 'application/json'})
         self.assertEqual(flagged.status_code, 409)
         self.assertEqual(flagged.get_json()['error'], 'month locked')
-        self.assertEqual(self.client.post(f'/v/{self.ada}/category/1', data={'category': 'Other'},
+        self.assertEqual(self.client.post(f'/v/{self.ada}/category/1', data={'category': 'Gift'},
                                           headers={'Accept': 'application/json'}).status_code, 409)
         self.assertEqual(self.client.post(f'/v/{self.ada}/comment', data={'comment': 'nope'},
                                           headers={'Accept': 'application/json'}).status_code, 409)

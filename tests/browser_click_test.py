@@ -28,15 +28,16 @@ with sync_playwright() as p:
     assert 'Credit' in credit.inner_text()
     assert '$17,048.40' in pg.locator('tr.ft').nth(0).inner_text()
     assert '$17,024.09' in pg.locator('tr.net').inner_text()
-    names = []
-    pg.locator('td.cat').first.click()
-    pg.locator('.dd').wait_for(state='visible')
-    names = pg.locator('.dd .ddo').all_inner_texts()
-    for name in ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                 'Business Services', 'Other', 'Entertainment', 'Communications', 'Cancel'):
-        assert name in names, names
-    pg.locator('.dd .ddo.cx').click()
-    pg.locator('.dd').wait_for(state='hidden')
+    sel = pg.locator('select.catsel').first
+    groups = sel.locator('optgroup').evaluate_all('els => els.map(e => e.label)')
+    assert groups == ['Office', 'Travel', 'Shop Supplies'], groups
+    options = sel.locator('option').evaluate_all('els => els.map(e => e.value)')
+    for name in ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
+                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance'):
+        assert name in options, options
+    assert sel.input_value() == 'Restaurant'
+    assert sel.locator('option[selected]').inner_text() == 'Restaurant (current)'
+    assert 'Other' not in options and 'Equipment Rental' not in options
 
     pg.emulate_media(media='print')
     assert pg.locator('button.sub').is_hidden()
@@ -93,10 +94,9 @@ with sync_playwright() as p:
     first_cat = pg.locator('td.cat').first
     original = first_cat.get_attribute('data-orig')
     with pg.expect_response(lambda r: '/category/' in r.url and r.status == 200):
-        first_cat.click()
-        pg.locator('.dd .ddo', has_text='Communications').click()
+        first_cat.locator('select.catsel').select_option('Gift')
     edited = pg.locator('td.cat').first
-    assert edited.locator('.ed-cat').inner_text() == 'Communications'
+    assert edited.locator('select.catsel').input_value() == 'Gift'
     assert edited.locator('s.orig').inner_text() == original
     pg.screenshot(path='screenshots/browser-category-edit.png')
     pg.locator('button.sub').click()
@@ -107,7 +107,7 @@ with sync_playwright() as p:
     assert 'ref pending' in done
     assert 'Flagged charges: wrong category' in done
     assert pg.locator('#fcb').count() == 0
-    assert pg.locator('.ed-cat').first.inner_text() == 'Communications'
+    assert 'Gift' in pg.locator('table tr').nth(1).inner_text()
     pg.screenshot(path='screenshots/browser-after-submit.png')
 
     pg.goto(links['alice-cox']['url'])
