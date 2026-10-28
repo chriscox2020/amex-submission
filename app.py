@@ -633,8 +633,9 @@ def employee_packet_rows(emp, rows, ts, comment, month_label):
     return table
 
 def file_submission_to_dropbox(doc, emp, rows, ts, comment=''):
-    """Upload this employee's PDF and xlsx, and the statement combined chart.
+    """Upload this employee's PDF and xlsx only.
     files/upload mode add + autorename. Never overwrite, never share, never delete.
+    A combined chart is never built here.
     """
     token = dropbox_access_token()
     closing = closing_folder_name(doc)
@@ -647,13 +648,7 @@ def file_submission_to_dropbox(doc, emp, rows, ts, comment=''):
     xlsx = summary.table_xlsx(employee_packet_rows(emp, rows, ts, comment, month))
     dropbox_upload(token, f'{folder}/{base}.pdf', pdf)
     dropbox_upload(token, f'{folder}/{base}.xlsx', xlsx)
-    # The combined chart stays at the top of American Express charges, not in the closing-date folder.
-    built = summary.build_summary(doc, state)
-    chart = f'Combined chart - Amex {month}'
-    dropbox_upload(token, f'{DROPBOX_ROOT}/{chart}.pdf', summary.build_pdf(built))
-    dropbox_upload(token, f'{DROPBOX_ROOT}/{chart}.xlsx', summary.build_xlsx(built))
-    return {'folder': folder, 'chart_folder': DROPBOX_ROOT,
-            'files': [base + '.pdf', base + '.xlsx', chart + '.pdf', chart + '.xlsx']}
+    return {'folder': folder, 'files': [base + '.pdf', base + '.xlsx']}
 
 def statement_all_submitted(doc):
     """True only when every employee on this statement has a submit record. Count comes from the statement."""
@@ -769,22 +764,8 @@ def send_combined_ready(doc, ts):
     return send_email(f'Combined Amex chart is ready: {month}', body, text)
 
 def maybe_file_final_chart(doc, ts):
-    """Once, when this statement's last employee submits. Failures are logged and do not raise."""
-    if not statement_all_submitted(doc) or combined_chart_auto_done(doc['stmt']):
-        return
-    try:
-        file_final_combined_chart(doc, ts)
-    except Exception as ex:
-        append({'type': 'combined_chart', 'stmt': doc['stmt'], 'ts': now(),
-                'status': f'error: {type(ex).__name__}: {ex}'})
-        return
-    append({'type': 'combined_chart', 'stmt': doc['stmt'], 'ts': now(), 'status': 'ok'})
-    try:
-        status = send_combined_ready(doc, ts)
-    except Exception as ex:
-        status = f'error: {type(ex).__name__}: {ex}'
-    append({'type': 'combined_chart_email', 'stmt': doc['stmt'], 'ts': now(),
-            'to': RECORD_TO, 'status': status})
+    """Combined charts are built manually with Chris. Submit never files one."""
+    return
 
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
@@ -1252,8 +1233,6 @@ def submit(token):
                   freview = f'error: {type(ex).__name__}: {ex}'
               append({'type': 'flag_review_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
                       'ts': now(), 'to': addr, 'count': len(flagged), 'status': freview})
-          # After the emails. Only the submit that completes the statement files the final chart.
-          maybe_file_final_chart(doc, rec['ts'])
     return redirect(f'/v/{token}', 303)
 
 @app.post('/v/<token>/comment')
@@ -1418,26 +1397,8 @@ def admin_dropbox_refile(stmt, emp_id):
 
 @app.post('/admin/combined/<stmt>')
 def admin_combined_chart(stmt):
-    """Regenerate the final combined chart. Chris or Meghan only. Does not write to QuickBooks."""
-    need_admin()
-    doc = load_statements().get(stmt)
-    if not doc:
-        return jsonify(error='unknown statement'), 404
-    if not statement_all_submitted(doc):
-        return jsonify(error='not ready'), 409
-    try:
-        base = file_final_combined_chart(doc, now())
-    except Exception as ex:
-        detail = f'{type(ex).__name__}: {ex}'
-        append({'type': 'combined_chart', 'stmt': stmt, 'ts': now(), 'status': 'error: ' + detail, 'manual': True})
-        return jsonify(error='Dropbox filing failed', detail=detail), 502
-    append({'type': 'combined_chart', 'stmt': stmt, 'ts': now(), 'status': 'ok', 'manual': True})
-    try:
-        status = send_combined_ready(doc, now())
-    except Exception as ex:
-        status = f'error: {type(ex).__name__}: {ex}'
-    append({'type': 'combined_chart_email', 'stmt': stmt, 'ts': now(), 'to': RECORD_TO, 'status': status, 'manual': True})
-    return jsonify(ok=True, file=base)
+    """Combined charts are built manually with Chris. This route does not build or upload one."""
+    return Response('Combined chart disabled; built manually with Chris', 403)
 
 @app.post('/admin/reset/<stmt>/<emp_id>')
 def admin_reset(stmt, emp_id):

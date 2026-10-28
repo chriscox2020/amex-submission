@@ -118,8 +118,8 @@ class DropboxFilingTest(unittest.TestCase):
         employee = "/Chris's AI/American Express charges/October 22/Sample Employee/"
         self.assertIn(employee + base + '.pdf', paths)
         self.assertIn(employee + base + '.xlsx', paths)
-        self.assertIn("/Chris's AI/American Express charges/Combined chart - Amex October 2026.pdf", paths)
-        self.assertIn("/Chris's AI/American Express charges/Combined chart - Amex October 2026.xlsx", paths)
+        self.assertEqual(len(uploads), 2)
+        self.assertFalse(any('Combined' in path or 'all submitted' in path for path in paths))
         for path in paths:
             if path.endswith(base + '.pdf') or path.endswith(base + '.xlsx'):
                 self.assertTrue(path.split('/')[-1].startswith('Sample Employee - '))
@@ -196,10 +196,10 @@ class DropboxFilingTest(unittest.TestCase):
         paths = [arg['path'] for arg, _data in self.upload_args()]
         self.assertTrue(any(path.startswith("/Chris's AI/American Express charges/October 22/Sample Employee/")
                             for path in paths))
-        self.assertTrue(any(path == "/Chris's AI/American Express charges/Combined chart - Amex October 2026.pdf"
-                            for path in paths))
+        self.assertEqual(len(paths), 2)
+        self.assertFalse(any('Combined' in path or 'all submitted' in path for path in paths))
 
-    def test_final_chart_waits_for_every_employee_and_nets_credits(self):
+    def test_submit_uploads_exactly_two_files_and_never_a_combined_chart(self):
         self.enable_dropbox()
         sent = []
         real_send = app.send_prepared
@@ -215,7 +215,6 @@ class DropboxFilingTest(unittest.TestCase):
             'employees': [
                 {'id': 'ada', 'name': 'Ada One', 'email': 'ada@example.com', 'rows': [
                     {'id': 1, 'date': '09/01/2026', 'category': 'Supplies', 'company': 'STORE', 'amount': 10.0},
-                    {'id': 2, 'date': '09/02/2026', 'category': 'Supplies', 'company': 'CREDIT', 'amount': -2.5},
                 ]},
                 {'id': 'ben', 'name': 'Ben Two', 'email': 'ben@example.com', 'rows': [
                     {'id': 1, 'date': '09/03/2026', 'category': 'Travel', 'company': 'AIR', 'amount': 4.0},
@@ -227,51 +226,26 @@ class DropboxFilingTest(unittest.TestCase):
         ben = app.make_token(STMT, 'ben')
         try:
             self.assertEqual(self.client.post(f'/v/{ada}/submit').status_code, 303)
-            early = [arg['path'] for arg, _data in self.upload_args()]
-            self.assertFalse(any('all submitted' in path for path in early))
+            self.assertEqual(len(self.upload_args()), 2)
+            self.assertFalse(any('Combined' in arg['path'] or 'all submitted' in arg['path']
+                                 for arg, _data in self.upload_args()))
             self.assertFalse(any('Combined Amex chart is ready' in str(m['Subject']) for m in sent))
             self.calls.clear()
-            sent.clear()
             self.assertEqual(self.client.post(f'/v/{ben}/submit').status_code, 303)
+            self.assertEqual(len(self.upload_args()), 2)
+            self.assertFalse(any('all submitted' in arg['path'] or 'Combined' in arg['path']
+                                 for arg, _data in self.upload_args()))
         finally:
             app.send_prepared = real_send
-        final = "/Chris's AI/American Express charges/Combined - Amex October 2026 - all submitted 2026-10-21 0930 CT"
-        paths = [arg['path'] for arg, _data in self.upload_args()]
-        self.assertIn(final + '.pdf', paths)
-        self.assertIn(final + '.xlsx', paths)
-        self.assertFalse(any('/October 22/' in path and 'all submitted' in path for path in paths))
-        chart = next(data for arg, data in self.upload_args() if arg['path'] == final + '.xlsx')
-        with zipfile.ZipFile(__import__('io').BytesIO(chart)) as zf:
-            categories = zf.read('xl/worksheets/sheet1.xml').decode()
-            employees = zf.read('xl/worksheets/sheet2.xml').decode()
-            charges = zf.read('xl/worksheets/sheet3.xml').decode()
-        self.assertIn('Ada One', categories)
-        self.assertIn('Ben Two', categories)
-        self.assertIn('Supplies', categories)
-        self.assertIn('7.50', categories)
-        self.assertIn('Grand total', categories)
-        self.assertIn('11.50', employees)
-        self.assertIn('CREDIT', charges)
-        self.assertIn('-2.50', charges)
-        self.assertIn('AIR', charges)
-        ready = [m for m in sent if 'Combined Amex chart is ready' in str(m['Subject'])]
-        self.assertEqual(len(ready), 1)
-        self.assertEqual(ready[0]['To'], 'littledude@mail.grokbot.com')
-        ready_text = ''
-        for part in ready[0].walk():
-            if part.get_content_type() == 'text/plain':
-                ready_text = part.get_payload(decode=True).decode()
-        self.assertIn('October 2026', ready_text)
-        self.assertIn('does not write to QuickBooks', ready_text)
         before = len(self.calls)
         app.maybe_file_final_chart(app.load_statements()[STMT], FROZEN)
         self.assertEqual(len(self.calls), before)
+        self.assertEqual([r for r in app.read_log() if r['type'] == 'combined_chart'], [])
+        disabled = self.client.post(f'/admin/combined/{STMT}', auth=('Chris', 'local-admin'))
+        self.assertEqual(disabled.status_code, 403)
+        self.assertEqual(disabled.get_data(as_text=True),
+                         'Combined chart disabled; built manually with Chris')
         self.assertEqual(self.client.post(f'/admin/combined/{STMT}').status_code, 401)
-        self.assertEqual(self.client.post(f'/admin/combined/{STMT}', auth=('Pat', 'local-admin')).status_code, 403)
-        self.calls.clear()
-        again = self.client.post(f'/admin/combined/{STMT}', auth=('Chris', 'local-admin'))
-        self.assertEqual(again.status_code, 200)
-        self.assertTrue(any('all submitted' in arg['path'] for arg, _data in self.upload_args()))
 
 
 if __name__ == '__main__':
