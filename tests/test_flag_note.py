@@ -26,9 +26,9 @@ import summary
 STMT = '2026-10-22'
 EMP = 'sample-employee'
 FROZEN = '2026-10-21T09:30:00-05:00'
-LINE_NOTE = '09/15/2026 | AMAZON MARKETPLACE | $1,234.50 | 10/21/2026 | ref pending | Note: not my charge'
-LINE_HTML = '09/16/2026 | DELTA AIR LINES | $318.40 | 10/21/2026 | AXP-998877 | Note: fee <b>wrong</b> & high'
-LINE_BLANK = '09/18/2026 | STAPLES | $18.25 | 10/21/2026 | ref pending'
+LINE_NOTE = '09/15/2026 | AMAZON MARKETPLACE | $1,234.50 | Office supplies | 10/21/2026 | ref pending | Note: not my charge'
+LINE_HTML = '09/16/2026 | DELTA AIR LINES | $318.40 | Travel | 10/21/2026 | AXP-998877 | Note: fee <b>wrong</b> & high'
+LINE_BLANK = '09/18/2026 | STAPLES | $18.25 | Supplies | 10/21/2026 | ref pending'
 SAMPLE_PATH = pathlib.Path('/tmp/sample-flag-email.txt')
 
 DOC = {
@@ -125,7 +125,9 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn(">Flagged charges</label>", page)
         self.assertIn("id='fcb'", page)
         self.assertIn(">Print</button>", page)
-        self.assertIn("button,.pop{display:none!important}", page)
+        self.assertIn("button.fb,button.sub,button.prt,button.sv,.pop,.catmenu{display:none!important}", page)
+        self.assertIn("value='No receipt'", page)
+        self.assertNotIn("value='Not my charge'", page)
         self.assertIn(f"/v/{self.token}/flag/1", page)
         self.assertNotIn('Note:', page)
         self.assertNotIn('Submit to QuickBooks for Pay', page)
@@ -149,18 +151,24 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.flag_comment_line('   '), '')
         self.assertEqual(app.canonical_category(' travel '), 'Travel')
         self.assertEqual(app.canonical_category('Meals'), '')
+        self.assertEqual(app.FLAG_REASONS, (
+            'Wrong category', 'Wrong price', 'Duplicate charge', 'No receipt', 'Other'))
         self.assertEqual(app.AMEX_CATEGORY_GROUPS, (
             ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
-            ('Travel', ('Travel', 'Travel Fuel')),
             ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
-            ('Auto Maintenance', ('Auto Maintenance',)),
+            ('Automotive', ('Travel Fuel', 'Auto Maintenance')),
+            ('Travel (hotels, other expenses)', ('Travel',)),
         ))
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
             'Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance'))
+            'Job Materials', 'Supplies', 'Repair & Maintenance', 'Travel Fuel', 'Auto Maintenance',
+            'Travel', 'Other Expense'))
+        self.assertEqual(app.AMEX_CATEGORIES[-1], 'Other Expense')
         self.assertEqual(tuple(summary.AMEX_CATEGORIES), tuple(app.AMEX_CATEGORIES))
+        self.assertEqual(app.canonical_category('Other'), '')
+        self.assertEqual(app.canonical_category('other expense'), 'Other Expense')
         self.assertNotIn('Other', app.AMEX_CATEGORIES)
-        self.assertNotIn('Other Expense', app.AMEX_CATEGORIES)
+        self.assertNotIn('Hotel', app.AMEX_CATEGORIES)
 
     def test_sample_page_and_record_email(self):
         amazon = self.flag(1, 'not my charge')
@@ -195,16 +203,21 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('>wrong category</textarea>', page)
         self.assertIn('>Flagged charges</label>', page)
         self.assertIn("data-orig='Travel'", page)
-        self.assertIn("<option value='Meals and Entertainment' selected>Meals and Entertainment</option>", page)
+        self.assertIn("data-value='Meals and Entertainment' aria-selected='true'>Meals and Entertainment</button>", page)
         self.assertIn("<s class='orig'>Meals</s>", page)
-        self.assertIn("<optgroup label='Office'>", page)
-        self.assertIn("<optgroup label='Travel'>", page)
-        self.assertIn("<optgroup label='Shop Supplies'>", page)
-        self.assertIn("<optgroup label='Auto Maintenance'>", page)
-        self.assertNotIn("<option value='Office'", page)
-        self.assertNotIn("<option value='Shop Supplies'", page)
+        self.assertIn("<div class='cathead'>Office</div>", page)
+        self.assertIn("<div class='cathead'>Shop Supplies</div>", page)
+        self.assertIn("<div class='cathead'>Automotive</div>", page)
+        self.assertIn("<div class='cathead'>Travel (hotels, other expenses)</div>", page)
+        self.assertNotIn("data-value='Office'", page)
+        self.assertNotIn("data-value='Shop Supplies'", page)
+        self.assertNotIn("data-value='Automotive'", page)
+        self.assertNotIn("data-value='Travel (hotels, other expenses)'", page)
+        self.assertNotIn("data-value='Hotel'", page)
+        self.assertNotIn("data-value='Other'", page)
+        self.assertIn("class='catopt ungrouped' role='option' data-value='Other Expense'", page)
         for name in app.AMEX_CATEGORIES:
-            self.assertIn(f"<option value='{html.escape(name)}'", page)
+            self.assertIn(f"data-value='{html.escape(name)}'", page)
 
         submitted = self.client.post(f'/v/{self.token}/submit', data={'comment': 'wrong category'})
         self.assertEqual(submitted.status_code, 303)
@@ -287,10 +300,15 @@ class FlagNoteTest(unittest.TestCase):
         app.append({'type': 'flag', 'stmt': STMT, 'emp_id': EMP, 'row': 3, 'date': '09/18/2026',
                     'category': 'Supplies', 'company': 'STAPLES', 'amount': 18.25,
                     'ts': '2026-10-01T15:00:00-05:00'})
-        legacy = '09/18/2026 | STAPLES | $18.25 | 10/01/2026 | ref pending'
+        legacy = '09/18/2026 | STAPLES | $18.25 | Supplies | 10/01/2026 | ref pending'
         page = self.page()
         self.assertIn(html.escape(legacy), page)
         self.assertNotIn('Note:', page)
+        os.remove(app.LOG)
+        app.append({'type': 'flag', 'stmt': STMT, 'emp_id': EMP, 'row': 3, 'date': '09/18/2026',
+                    'category': 'Supplies', 'company': 'STAPLES', 'amount': 18.25,
+                    'note': 'Not my charge', 'ts': '2026-10-01T15:00:00-05:00'})
+        self.assertIn('Not my charge', self.page())
 
         # Re-flag through the endpoint so the CSV sees a formula-like note.
         os.remove(app.LOG)
@@ -362,23 +380,23 @@ class FlagNoteTest(unittest.TestCase):
         bundled = ROOT / 'statements' / 'bundled' / '2026-09-22.json'
         digest = hashlib.sha256(bundled.read_bytes()).hexdigest()
         page = self.page()
-        self.assertIn("<optgroup label='Office'>", page)
-        self.assertIn("<optgroup label='Travel'>", page)
-        self.assertIn("<optgroup label='Shop Supplies'>", page)
-        self.assertIn("<optgroup label='Auto Maintenance'>", page)
-        self.assertIn("<optgroup label='Shop Supplies'><option value='Job Materials'>Job Materials</option><option value='Supplies'>Supplies</option><option value='Repair &amp; Maintenance'>Repair &amp; Maintenance</option></optgroup>", page)
-        self.assertIn("<optgroup label='Auto Maintenance'><option value='Auto Maintenance'>Auto Maintenance</option></optgroup>", page)
-        self.assertNotIn("<option value='Office'", page)
-        self.assertNotIn("<option value='Shop Supplies'", page)
-        self.assertNotIn("<option value='Other'", page)
-        self.assertNotIn("<option value='Other Expense'", page)
-        self.assertNotIn("<option value='Equipment Rental'", page)
-        self.assertIn("<option value='Office supplies' selected>Office supplies (current)</option>", page)
-        self.assertIn("<option value='Meals' selected>Meals (current)</option>", page)
-        self.assertIn("<option value='Travel' selected>Travel</option>", page)
+        self.assertIn("<div class='cathead'>Office</div>", page)
+        self.assertIn("<div class='cathead'>Shop Supplies</div>", page)
+        self.assertIn("<div class='cathead'>Automotive</div>", page)
+        self.assertIn("<div class='cathead'>Travel (hotels, other expenses)</div>", page)
+        self.assertIn("<div class='cathead'>Shop Supplies</div><button type='button' class='catopt' role='option' data-value='Job Materials' aria-selected='false'>Job Materials</button><button type='button' class='catopt' role='option' data-value='Supplies' aria-selected='false'>Supplies</button><button type='button' class='catopt' role='option' data-value='Repair &amp; Maintenance' aria-selected='false'>Repair &amp; Maintenance</button>", page)
+        self.assertIn("<div class='cathead'>Automotive</div><button type='button' class='catopt' role='option' data-value='Travel Fuel' aria-selected='false'>Travel Fuel</button>", page)
+        self.assertIn("data-value='Auto Maintenance' aria-selected='false'>Auto Maintenance</button>", page)
+        self.assertIn("data-value='Travel' aria-selected='true'>Travel</button>", page)
+        self.assertNotIn("data-value='Office'", page)
+        self.assertNotIn("data-value='Shop Supplies'", page)
+        self.assertNotIn("data-value='Hotel'", page)
+        self.assertNotIn("data-value='Other'", page)
+        self.assertIn("data-value='Office supplies' aria-selected='true'>Office supplies (current)</button>", page)
+        self.assertIn("data-value='Meals' aria-selected='true'>Meals (current)</button>", page)
         self.assertNotIn('Travel (current)', page)
         for name in app.AMEX_CATEGORIES:
-            self.assertIn(f"<option value='{html.escape(name)}'", page)
+            self.assertIn(f"data-value='{html.escape(name)}'", page)
 
         rejected = self.client.post(f'/v/{self.token}/category/1', data={'category': 'Equipment Rental'},
                                     headers={'Accept': 'application/json'})
@@ -388,7 +406,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(kept.status_code, 200)
         self.assertEqual(kept.get_json()['category'], 'Office supplies')
         still = self.page()
-        self.assertIn("<option value='Office supplies' selected>Office supplies (current)</option>", still)
+        self.assertIn("data-value='Office supplies' aria-selected='true'>Office supplies (current)</button>", still)
 
         submitted = self.client.post(f'/v/{self.token}/submit')
         self.assertEqual(submitted.status_code, 303)

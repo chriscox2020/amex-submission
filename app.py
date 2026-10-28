@@ -208,11 +208,13 @@ REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'ref
 # Employee dropdown groups. Headings are optgroup labels and are not categories.
 AMEX_CATEGORY_GROUPS = (
     ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
-    ('Travel', ('Travel', 'Travel Fuel')),
     ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
-    ('Auto Maintenance', ('Auto Maintenance',)),
+    ('Automotive', ('Travel Fuel', 'Auto Maintenance')),
+    ('Travel (hotels, other expenses)', ('Travel',)),
 )
-AMEX_CATEGORIES = tuple(name for _label, names in AMEX_CATEGORY_GROUPS for name in names)
+# After the groups, not inside one, and not a default for blank or off-list charges.
+AMEX_UNGROUPED = ('Other Expense',)
+AMEX_CATEGORIES = tuple(name for _label, names in AMEX_CATEGORY_GROUPS for name in names) + AMEX_UNGROUPED
 
 def clean_note(raw):
     """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
@@ -240,13 +242,16 @@ def flag_day(ts):
     except Exception:
         return str(ts)[:10]
 
-def flag_line(row, note, flagged_ts):
-    """charge date | merchant | amount | flagged date | reference | Note: text
+def flag_line(row, note, flagged_ts, category=None):
+    """date | store | amount | current category | flagged date | reference | Note: text
 
     The note is omitted when blank. Callers HTML-escape the whole line.
+    A saved note is shown as stored, including an older 'Not my charge' reason.
     """
+    if category is None:
+        category = row.get('amex_category') or row.get('category') or ''
     parts = [str(row.get('date') or ''), str(row.get('company') or ''), money(row.get('amount') or 0),
-             flag_day(flagged_ts), charge_ref(row)]
+             str(category), flag_day(flagged_ts), charge_ref(row)]
     line = ' | '.join(parts)
     note = clean_note(note)
     if note: line += ' | Note: ' + note
@@ -268,12 +273,12 @@ def attach_flag_meta(rows, flags):
         out.append(item)
     return out
 
-def flag_items_html(rows, flags):
+def flag_items_html(rows, flags, categories=None):
     items = []
     for r in rows:
         if r['id'] not in flags: continue
         info = flag_meta(flags, r['id'])
-        line = flag_line(r, info.get('note', ''), info.get('ts', ''))
+        line = flag_line(r, info.get('note', ''), info.get('ts', ''), display_category(r, categories or {}))
         items.append(f"<li data-row='{int(r['id'])}'>{html.escape(line)}</li>")
     return ''.join(items)
 
@@ -286,7 +291,7 @@ def posted_field(name):
         return request.form.get(name)
     return None
 
-FLAG_REASONS = ('Wrong category', 'Wrong price', 'Duplicate charge', 'Not my charge', 'Other')
+FLAG_REASONS = ('Wrong category', 'Wrong price', 'Duplicate charge', 'No receipt', 'Other')
 
 def is_credit_row(row):
     try:
@@ -482,8 +487,21 @@ tr.f td{background:#ffecec}tr.ed td{background:#e3f0ff}tr.cr td{background:#f3fb
 label.boxlabel{display:block;font-weight:bold;margin:24px 0 6px}
 #fcb{width:100%;box-sizing:border-box;height:110px;font-size:20px;border:2px solid #333;padding:8px}
 #flaglist{margin:16px 0 0;padding-left:18px}#flaglist li,.done li{margin:6px 0;font-size:15px;line-height:1.4}
-td.cat{position:relative}td.cat:hover{outline:2px solid #69c}
-select.catsel{font:inherit;font-size:16px;max-width:100%}
+td.cat{position:relative}
+.catpick{position:relative}
+.catbtn{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:48px;padding:12px 14px;
+font:inherit;font-size:18px;font-weight:700;line-height:1.3;color:#fff;background:#1c1c1c;border:2px solid #111;border-radius:8px;cursor:pointer}
+.catbtn.ed-cat{color:#c5dcff}
+.catbtn:focus-visible,.catopt:focus-visible{outline:3px solid #7eb6ff;outline-offset:2px}
+.catmenu{position:absolute;z-index:30;right:0;top:calc(100% + 4px);width:min(340px,calc(100vw - 24px));max-height:70vh;overflow:auto;
+background:#1c1c1c;color:#fff;border:2px solid #111;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.35);padding:6px;text-align:left}
+.catmenu[hidden]{display:none!important}
+.cathead{margin:6px 4px 2px;padding:12px 14px;font-size:20px;font-weight:800;line-height:1.2;color:#fff;background:#000;border-radius:6px}
+.catopt{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:48px;padding:14px 16px;
+font:inherit;font-size:18px;font-weight:700;line-height:1.3;color:#fff;background:#1c1c1c;border:0;border-radius:8px;cursor:pointer}
+.catopt.cur{background:#333}
+.catopt.ungrouped{margin-top:8px;border-top:2px solid #fff;border-radius:0 0 8px 8px}
+.catopt:hover{background:#2a2a2a}
 .edited{font-weight:bold}.ed-cat{color:#06c;font-weight:bold}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
 s.orig{display:block;font-size:14px;color:#888;font-weight:normal}
 .crn{color:#080;font-weight:bold}.crl{font-size:14px;color:#080;font-weight:bold;border:1px solid #080;border-radius:4px;padding:1px 6px;margin-left:6px}
@@ -493,35 +511,78 @@ tr.ft td{background:#f6f6f6;font-size:22px}tr.net td{font-weight:bold;font-size:
 .prt{margin-top:24px;margin-left:12px;font-size:28px;padding:14px 50px;background:#fff;color:#333;border:2px solid #333;border-radius:6px;cursor:pointer}
 @media(max-width:700px){body{font-size:15px}.banner{font-size:28px;padding:16px 8px}h1{font-size:26px;margin:0 8px 12px}.sheet{margin:0 8px 24px}
 td,th{padding:6px}.sub,.prt{font-size:20px;padding:12px 22px}#fcb{height:80px;font-size:16px}tr.ft td,tr.net td{font-size:16px}}
-@media print{button,.pop{display:none!important}select.catsel{-webkit-appearance:none;appearance:none;border:0;background:transparent;color:inherit}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
+@media print{button.fb,button.sub,button.prt,button.sv,.pop,.catmenu{display:none!important}.catbtn{background:transparent;color:#000;border:0;padding:0;min-height:0;font-size:12pt}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
 tr{page-break-inside:avoid}td,th{padding:4px 6px}#fcb{height:60px}tr.ft td{font-size:12pt}tr.net td{font-size:13pt}
 *{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 """
 
-JS = r"""function paintCat(sel,v){
-  var td=sel.closest('td');if(!td)return;
+JS = r"""function closeCats(){
+  document.querySelectorAll('.catmenu').forEach(function(m){m.hidden=true});
+  document.querySelectorAll('.catbtn').forEach(function(b){b.setAttribute('aria-expanded','false')});
+}
+function paintCat(btn,v){
+  var td=btn.closest('td');if(!td)return;
   var orig=td.getAttribute('data-orig')||'';
   td.setAttribute('data-cur',v);
-  sel.setAttribute('data-cur',v);
+  btn.setAttribute('data-cur',v);
   var old=td.querySelector('s.orig');
   var changed=v!==orig;
-  sel.classList.toggle('ed-cat',changed);
+  btn.classList.toggle('ed-cat',changed);
   if(changed){
     if(!old){old=document.createElement('s');old.className='orig';td.appendChild(old)}
     old.textContent=orig;
   }else if(old)old.remove();
   if(td.parentNode)td.parentNode.classList.toggle('ed',changed);
 }
-document.querySelectorAll('select.catsel').forEach(function(sel){
-  sel.addEventListener('change',function(){
-    var prev=sel.getAttribute('data-cur');
-    if(prev==null)prev=sel.value;
-    var v=sel.value;
-    fetch(sel.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
-      if(!r.ok){sel.value=prev;return}
-      paintCat(sel,v);
-    }).catch(function(){sel.value=prev});
-  })});
+function chooseCat(btn,opt){
+  var v=opt.getAttribute('data-value');
+  var prev=btn.getAttribute('data-cur')||'';
+  var prevLabel=btn.textContent;
+  fetch(btn.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
+    if(!r.ok){btn.textContent=prevLabel;btn.setAttribute('data-cur',prev);return}
+    btn.textContent=opt.textContent;
+    var menu=btn.parentNode.querySelector('.catmenu');
+    menu.querySelectorAll('.catopt').forEach(function(o){
+      var on=o.getAttribute('data-value')===v;
+      o.classList.toggle('cur',on);
+      if(on)o.setAttribute('aria-selected','true');else o.setAttribute('aria-selected','false');
+    });
+    paintCat(btn,v);
+    closeCats();
+    btn.focus();
+  }).catch(function(){btn.textContent=prevLabel;btn.setAttribute('data-cur',prev)});
+}
+document.querySelectorAll('.catpick').forEach(function(box){
+  var btn=box.querySelector('.catbtn');
+  var menu=box.querySelector('.catmenu');
+  function openMenu(){
+    var was=menu.hidden;
+    closeCats();
+    if(!was)return;
+    menu.hidden=false;
+    btn.setAttribute('aria-expanded','true');
+    var cur=menu.querySelector('.catopt.cur')||menu.querySelector('.catopt');
+    if(cur)cur.focus();
+  }
+  btn.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();openMenu()});
+  btn.addEventListener('keydown',function(ev){
+    if(ev.key==='ArrowDown'||ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(menu.hidden)openMenu()}
+  });
+  menu.addEventListener('keydown',function(ev){
+    var list=Array.prototype.slice.call(menu.querySelectorAll('.catopt'));
+    var i=list.indexOf(document.activeElement);
+    if(ev.key==='ArrowDown'){ev.preventDefault();if(list.length)list[Math.min(list.length-1,Math.max(0,i)+1)].focus()}
+    else if(ev.key==='ArrowUp'){ev.preventDefault();if(list.length)list[Math.max(0,(i<0?1:i)-1)].focus()}
+    else if(ev.key==='Home'){ev.preventDefault();if(list.length)list[0].focus()}
+    else if(ev.key==='End'){ev.preventDefault();if(list.length)list[list.length-1].focus()}
+    else if((ev.key==='Enter'||ev.key===' ')&&document.activeElement&&document.activeElement.classList.contains('catopt')){ev.preventDefault();chooseCat(btn,document.activeElement)}
+    else if(ev.key==='Escape'){ev.preventDefault();closeCats();btn.focus()}
+  });
+  menu.querySelectorAll('.catopt').forEach(function(opt){
+    opt.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();chooseCat(btn,opt)});
+  });
+});
+document.addEventListener('click',function(ev){if(!ev.target.closest('.catpick'))closeCats()});
 var pop=document.getElementById('pop');
 function closePop(){pop.hidden=true;if(pop.parentNode!==document.body)document.body.appendChild(pop)}
 function paintMerchant(tr,flagged,note){
@@ -576,7 +637,7 @@ function savePop(){
   postFlag(btn,reason,pop.querySelector('textarea').value.slice(0,500),true)}
 document.querySelectorAll('button.fb').forEach(function(b){b.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();openPop(b)})});
 document.getElementById('popsave').addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();savePop()});
-document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pop.hidden){ev.preventDefault();closePop()}}});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){closeCats();if(!pop.hidden){ev.preventDefault();closePop()}}});
 var commentBox=document.getElementById('fcb');
 if(commentBox&&commentBox.getAttribute('data-action')){
   var commentTimer=null;
@@ -596,29 +657,47 @@ def category_view(row, categories):
     edited = bool(explicit and (current or '') != (baseline or ''))
     return current, original, edited
 
-def category_select(current, token, row_id, edited):
-    """Every charge can pick any list category. An off-list stored value stays selected as '(current)'."""
+def _cat_option(value, label, selected, extra=''):
+    esc = html.escape
+    cls = 'catopt' + (' cur' if selected else '') + ((' ' + extra) if extra else '')
+    aria = 'true' if selected else 'false'
+    return (f"<button type='button' class='{cls}' role='option' data-value='{esc(value)}' aria-selected='{aria}'>"
+            f"{esc(label)}</button>")
+
+def category_picker(current, token, row_id, edited):
+    """Grouped list any charge can use. Headings are not options. Off-list values stay as '(current)'."""
     esc = html.escape
     cur = str(current or '')
     known = False
-    groups = []
+    blocks = []
     for label, names in AMEX_CATEGORY_GROUPS:
         opts = []
         for name in names:
             selected = cur.casefold() == name.casefold()
             if selected:
                 known = True
-            sel = ' selected' if selected else ''
-            opts.append(f"<option value='{esc(name)}'{sel}>{esc(name)}</option>")
-        groups.append(f"<optgroup label='{esc(label)}'>{''.join(opts)}</optgroup>")
+            opts.append(_cat_option(name, name, selected))
+        blocks.append(f"<div class='catgrp' role='group' aria-label='{esc(label)}'>"
+                      f"<div class='cathead'>{esc(label)}</div>{''.join(opts)}</div>")
+    ungrouped = []
+    for name in AMEX_UNGROUPED:
+        selected = cur.casefold() == name.casefold()
+        if selected:
+            known = True
+        ungrouped.append(_cat_option(name, name, selected, 'ungrouped'))
+    face = cur
     prefix = ''
     if not cur:
-        prefix = "<option value='' selected></option>"
+        face = 'Choose category'
     elif not known:
-        prefix = f"<option value='{esc(cur)}' selected>{esc(cur)} (current)</option>"
-    cls = 'catsel ed-cat' if edited else 'catsel'
-    return (f"<select class='{cls}' data-cur='{esc(cur)}' data-action='/v/{token}/category/{int(row_id)}'>"
-            f"{prefix}{''.join(groups)}</select>")
+        face = cur + ' (current)'
+        prefix = _cat_option(cur, face, True)
+    cls = 'catbtn ed-cat' if edited else 'catbtn'
+    return (f"<div class='catpick'>"
+            f"<button type='button' class='{cls}' aria-haspopup='listbox' aria-expanded='false' "
+            f"data-cur='{esc(cur)}' data-action='/v/{token}/category/{int(row_id)}'>{esc(face)}</button>"
+            f"<div class='catmenu' hidden role='listbox' aria-label='Pick category'>{prefix}{''.join(blocks)}{''.join(ungrouped)}</div>"
+            f"</div>")
 
 def popup_html():
     chips = []
@@ -641,7 +720,7 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
     categories = categories or {}
     if submitted is not None and 'comment' in submitted:
         comment = submitted.get('comment') or ''
-    lis = flag_items_html(rows, flags)
+    lis = flag_items_html(rows, flags, categories)
     charges = [r for r in rows if not is_credit_row(r)]
     credits = [r for r in rows if is_credit_row(r)]
     tot_ch = sum(float(r['amount']) for r in charges)
@@ -667,7 +746,7 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
             inner = esc(shown)
         else:
             strike = f"<s class='orig'>{esc(original)}</s>" if edited and original and original != current else ''
-            inner = category_select(current, token, rid, edited) + strike
+            inner = category_picker(current, token, rid, edited) + strike
         cat_cls = '' if credit or locked else " class='cat'"
         tr_cls = []
         if credit: tr_cls.append('cr')
@@ -772,7 +851,7 @@ def flag(token, row):
         payload = {'flagged': on, 'count': count, 'row': row}
         if on:
             payload['note'] = rec.get('note') or ''
-            payload['line'] = flag_line(r, rec.get('note', ''), rec['ts'])
+            payload['line'] = flag_line(r, rec.get('note', ''), rec['ts'], display_category(r, _categories))
         return jsonify(payload)
     return redirect(f'/v/{token}', 303)
 
