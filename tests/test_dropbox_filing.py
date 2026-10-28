@@ -199,6 +199,80 @@ class DropboxFilingTest(unittest.TestCase):
         self.assertTrue(any(path == "/Chris's AI/American Express charges/Combined chart - Amex October 2026.pdf"
                             for path in paths))
 
+    def test_final_chart_waits_for_every_employee_and_nets_credits(self):
+        self.enable_dropbox()
+        sent = []
+        real_send = app.send_prepared
+
+        def send(msg):
+            sent.append(msg)
+            return 'mocked'
+
+        app.send_prepared = send
+        two = {
+            'stmt': STMT,
+            'label': 'Oct 22, 2026 statement',
+            'employees': [
+                {'id': 'ada', 'name': 'Ada One', 'email': 'ada@example.com', 'rows': [
+                    {'id': 1, 'date': '09/01/2026', 'category': 'Supplies', 'company': 'STORE', 'amount': 10.0},
+                    {'id': 2, 'date': '09/02/2026', 'category': 'Supplies', 'company': 'CREDIT', 'amount': -2.5},
+                ]},
+                {'id': 'ben', 'name': 'Ben Two', 'email': 'ben@example.com', 'rows': [
+                    {'id': 1, 'date': '09/03/2026', 'category': 'Travel', 'company': 'AIR', 'amount': 4.0},
+                ]},
+            ],
+        }
+        pathlib.Path(app.DATA_DIR, 'statements', STMT + '.json').write_text(json.dumps(two))
+        ada = app.make_token(STMT, 'ada')
+        ben = app.make_token(STMT, 'ben')
+        try:
+            self.assertEqual(self.client.post(f'/v/{ada}/submit').status_code, 303)
+            early = [arg['path'] for arg, _data in self.upload_args()]
+            self.assertFalse(any('all submitted' in path for path in early))
+            self.assertFalse(any('Combined Amex chart is ready' in str(m['Subject']) for m in sent))
+            self.calls.clear()
+            sent.clear()
+            self.assertEqual(self.client.post(f'/v/{ben}/submit').status_code, 303)
+        finally:
+            app.send_prepared = real_send
+        final = "/Chris's AI/American Express charges/Combined - Amex October 2026 - all submitted 2026-10-21 0930 CT"
+        paths = [arg['path'] for arg, _data in self.upload_args()]
+        self.assertIn(final + '.pdf', paths)
+        self.assertIn(final + '.xlsx', paths)
+        self.assertFalse(any('/October 22/' in path and 'all submitted' in path for path in paths))
+        chart = next(data for arg, data in self.upload_args() if arg['path'] == final + '.xlsx')
+        with zipfile.ZipFile(__import__('io').BytesIO(chart)) as zf:
+            categories = zf.read('xl/worksheets/sheet1.xml').decode()
+            employees = zf.read('xl/worksheets/sheet2.xml').decode()
+            charges = zf.read('xl/worksheets/sheet3.xml').decode()
+        self.assertIn('Ada One', categories)
+        self.assertIn('Ben Two', categories)
+        self.assertIn('Supplies', categories)
+        self.assertIn('7.50', categories)
+        self.assertIn('Grand total', categories)
+        self.assertIn('11.50', employees)
+        self.assertIn('CREDIT', charges)
+        self.assertIn('-2.50', charges)
+        self.assertIn('AIR', charges)
+        ready = [m for m in sent if 'Combined Amex chart is ready' in str(m['Subject'])]
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(ready[0]['To'], 'littledude@mail.grokbot.com')
+        ready_text = ''
+        for part in ready[0].walk():
+            if part.get_content_type() == 'text/plain':
+                ready_text = part.get_payload(decode=True).decode()
+        self.assertIn('October 2026', ready_text)
+        self.assertIn('does not write to QuickBooks', ready_text)
+        before = len(self.calls)
+        app.maybe_file_final_chart(app.load_statements()[STMT], FROZEN)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(self.client.post(f'/admin/combined/{STMT}').status_code, 401)
+        self.assertEqual(self.client.post(f'/admin/combined/{STMT}', auth=('Pat', 'local-admin')).status_code, 403)
+        self.calls.clear()
+        again = self.client.post(f'/admin/combined/{STMT}', auth=('Chris', 'local-admin'))
+        self.assertEqual(again.status_code, 200)
+        self.assertTrue(any('all submitted' in arg['path'] for arg, _data in self.upload_args()))
+
 
 if __name__ == '__main__':
     unittest.main()

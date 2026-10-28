@@ -389,6 +389,77 @@ def table_xlsx(rows, sheet_name='Charges'):
     return buf.getvalue()
 
 
+def _col_name(index):
+    """0-based spreadsheet column, including AA and beyond."""
+    name = ''
+    n = index + 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        name = chr(ord('A') + rem) + name
+    return name
+
+
+def _xlsx_sheet_wide(rows):
+    body = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>']
+    for r, row in enumerate(rows, start=1):
+        body.append(f'<row r="{r}">')
+        for c, cell in enumerate(row):
+            text = xml_escape('' if cell is None else str(cell))
+            body.append(f'<c r="{_col_name(c)}{r}" t="inlineStr"><is><t>{text}</t></is></c>')
+        body.append('</row>')
+    body.append('</sheetData></worksheet>')
+    return ''.join(body).encode('utf-8')
+
+
+def workbook_xlsx(sheets):
+    """Several named sheets. Does not call any outside service."""
+    overrides = []
+    sheet_tags = []
+    rels = []
+    files = {}
+    for i, (name, rows) in enumerate(sheets, start=1):
+        files[f'xl/worksheets/sheet{i}.xml'] = _xlsx_sheet_wide(rows)
+        overrides.append(
+            f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+        sheet_tags.append(f'<sheet name="{xml_escape(name)}" sheetId="{i}" r:id="rId{i}"/>')
+        rels.append(
+            f'<Relationship Id="rId{i}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            f'Target="worksheets/sheet{i}.xml"/>')
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + ''.join(overrides) + '</Types>')
+    package_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+        + ''.join(sheet_tags) + '</sheets></workbook>')
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + ''.join(rels) + '</Relationships>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('[Content_Types].xml', content_types)
+        zf.writestr('_rels/.rels', package_rels)
+        zf.writestr('xl/workbook.xml', workbook)
+        zf.writestr('xl/_rels/workbook.xml.rels', workbook_rels)
+        for path, sheet in files.items():
+            zf.writestr(path, sheet)
+    return buf.getvalue()
+
+
 def summary_filename(summary, ext):
     """Saved and attached as 'American Express charges October 2026 - Summary.pdf'."""
     return f"{summary['period']['folder_label']} - Summary.{ext}"
