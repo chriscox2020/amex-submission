@@ -88,6 +88,23 @@ class FlagNoteTest(unittest.TestCase):
     def flags(self):
         return [r for r in app.read_log() if r.get('type') == 'flag']
 
+    def messages_with_subject(self, prefix):
+        found = []
+        for path in pathlib.Path(app.OUTBOX).glob('*.eml'):
+            msg = email.message_from_bytes(path.read_bytes())
+            if str(msg['Subject'] or '').startswith(prefix):
+                found.append(msg)
+        return found
+
+    def message_text(self, msg):
+        text = html_body = ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                text = part.get_payload(decode=True).decode()
+            elif part.get_content_type() == 'text/html':
+                html_body = part.get_payload(decode=True).decode()
+        return text, html_body
+
     def test_token_is_unchanged(self):
         self.assertEqual(self.token, independent_token(STMT, EMP))
         self.assertEqual(len(self.token), 24)
@@ -135,11 +152,12 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.AMEX_CATEGORY_GROUPS, (
             ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
             ('Travel', ('Travel', 'Travel Fuel')),
-            ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance')),
+            ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
+            ('Auto Maintenance', ('Auto Maintenance',)),
         ))
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
             'Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance'))
+            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance'))
         self.assertEqual(tuple(summary.AMEX_CATEGORIES), tuple(app.AMEX_CATEGORIES))
         self.assertNotIn('Other', app.AMEX_CATEGORIES)
         self.assertNotIn('Other Expense', app.AMEX_CATEGORIES)
@@ -182,6 +200,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn("<optgroup label='Office'>", page)
         self.assertIn("<optgroup label='Travel'>", page)
         self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'>", page)
         self.assertNotIn("<option value='Office'", page)
         self.assertNotIn("<option value='Shop Supplies'", page)
         for name in app.AMEX_CATEGORIES:
@@ -193,7 +212,8 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(again.status_code, 303)
         blocked = self.flag(4, 'too late')
         self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(len(list(pathlib.Path(app.OUTBOX).glob('*.eml'))), 1)
+        self.assertEqual(len(self.messages_with_subject('Amex verification SUBMITTED:')), 1)
+        self.assertEqual(len(self.messages_with_subject('Review your flagged charges')), 1)
 
         summary = self.page()
         self.assertIn('Submitted', summary)
@@ -204,7 +224,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertLess(summary.index(html.escape(LINE_NOTE)), summary.index(html.escape(LINE_HTML)))
         self.assertLess(summary.index(html.escape(LINE_HTML)), summary.index(html.escape(LINE_BLANK)))
 
-        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        msg = self.messages_with_subject('Amex verification SUBMITTED:')[0]
         text = html_body = ''
         for part in msg.walk():
             if part.get_content_type() == 'text/plain':
@@ -313,7 +333,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Gift'},
                                           headers={'Accept': 'application/json'}).get_json()['category'], 'Gift')
         self.client.post(f'/v/{self.token}/submit', data={'comment': nasty})
-        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        msg = self.messages_with_subject('Amex verification SUBMITTED:')[0]
         text = html_body = ''
         for part in msg.walk():
             if part.get_content_type() == 'text/plain':
@@ -345,6 +365,9 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn("<optgroup label='Office'>", page)
         self.assertIn("<optgroup label='Travel'>", page)
         self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'>", page)
+        self.assertIn("<optgroup label='Shop Supplies'><option value='Job Materials'>Job Materials</option><option value='Supplies'>Supplies</option><option value='Repair &amp; Maintenance'>Repair &amp; Maintenance</option></optgroup>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'><option value='Auto Maintenance'>Auto Maintenance</option></optgroup>", page)
         self.assertNotIn("<option value='Office'", page)
         self.assertNotIn("<option value='Shop Supplies'", page)
         self.assertNotIn("<option value='Other'", page)
@@ -392,6 +415,124 @@ class FlagNoteTest(unittest.TestCase):
             "<td style='padding:4px 8px'>Meals</td>",
             html_body)
         self.assertEqual(hashlib.sha256(bundled.read_bytes()).hexdigest(), digest)
+
+    def test_flag_review_email_follows_the_filing_record(self):
+        """One review email to the employee. The filing record still goes out first, with the flag reasons."""
+        calls = []
+        real = app.send_prepared
+
+        def capture(msg):
+            calls.append(msg)
+            return 'mocked'
+
+        app.send_prepared = capture
+        try:
+            self.flag(1, 'not my charge')
+            self.flag(2, 'fee high')
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+            self.assertEqual([''.join(str(m['Subject']).splitlines()) for m in calls], [
+                'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 2 flagged',
+                'Review your flagged charges',
+            ])
+            record, review = calls
+            self.assertEqual(record['To'], 'littledude@mail.grokbot.com')
+            self.assertEqual(record['From'], app.MAIL_FROM)
+            record_text, _record_html = self.message_text(record)
+            self.assertIn('Note: not my charge', record_text)
+            self.assertIn('Note: fee high', record_text)
+            self.assertIn('AMAZON MARKETPLACE', record_text)
+            self.assertIn('DELTA AIR LINES', record_text)
+            self.assertEqual(review['To'], 'sample@coxresearch.com')
+            self.assertEqual(review['From'], app.MAIL_FROM)
+            self.assertIsNone(review['Cc'])
+            review_text, review_html = self.message_text(review)
+            self.assertEqual(review_text.count('AMAZON MARKETPLACE'), 1)
+            self.assertIn('09/15/2026 | AMAZON MARKETPLACE | $1,234.50 | Office supplies | not my charge', review_text)
+            self.assertIn('09/16/2026 | DELTA AIR LINES | $318.40 | Travel | fee high', review_text)
+            self.assertIn('Office supplies', review_html)
+            self.assertEqual(len([m for m in calls if str(m['Subject']) == 'Review your flagged charges']), 1)
+            self.assertEqual(self.client.post(f'/v/{self.token}/submit').status_code, 303)
+            self.assertEqual(len(calls), 2)
+        finally:
+            app.send_prepared = real
+
+    def test_flag_review_failure_does_not_block_the_record(self):
+        calls = []
+        real = app.send_prepared
+
+        def capture(msg):
+            calls.append(''.join(str(msg['Subject']).splitlines()))
+            if ''.join(str(msg['Subject']).splitlines()) == 'Review your flagged charges':
+                raise OSError('flag mail down')
+            return 'mocked-record'
+
+        app.send_prepared = capture
+        try:
+            self.flag(1, 'not my charge')
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+        finally:
+            app.send_prepared = real
+        self.assertEqual(calls, [
+            'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 1 flagged',
+            'Review your flagged charges',
+        ])
+        record = next(r for r in app.read_log() if r['type'] == 'email')
+        self.assertEqual(record['status'], 'mocked-record')
+        self.assertEqual(record['to'], 'littledude@mail.grokbot.com')
+        review = next(r for r in app.read_log() if r['type'] == 'flag_review_email')
+        self.assertEqual(review['to'], 'sample@coxresearch.com')
+        self.assertTrue(str(review['status']).startswith('error: OSError:'))
+        self.assertEqual(review['count'], 1)
+
+    def test_no_flags_sends_no_review_email(self):
+        calls = []
+        real = app.send_prepared
+
+        def capture(msg):
+            calls.append(str(msg['Subject']))
+            return 'mocked'
+
+        app.send_prepared = capture
+        try:
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+        finally:
+            app.send_prepared = real
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith('Amex verification SUBMITTED:'))
+        self.assertEqual([r for r in app.read_log() if r['type'] == 'flag_review_email'], [])
+
+    def test_flag_review_without_an_address_is_logged(self):
+        path = pathlib.Path(app.DATA_DIR, 'statements', STMT + '.json')
+        saved = path.read_text()
+        doc = json.loads(saved)
+        doc['employees'][0].pop('email', None)
+        doc['employees'][0].pop('send_to', None)
+        path.write_text(json.dumps(doc))
+        calls = []
+        real = app.send_prepared
+
+        def capture(msg):
+            calls.append(''.join(str(msg['Subject']).splitlines()))
+            return 'mocked'
+
+        app.send_prepared = capture
+        try:
+            self.flag(1, 'not my charge')
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+        finally:
+            app.send_prepared = real
+            path.write_text(saved)
+        self.assertEqual(calls, [
+            'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 1 flagged',
+        ])
+        review = next(r for r in app.read_log() if r['type'] == 'flag_review_email')
+        self.assertEqual(review['to'], '')
+        self.assertIn('no employee email', review['status'])
+        self.assertTrue(str(review['status']).startswith('error:'))
 
     def test_record_address_credits_and_alice_routing(self):
         self.assertEqual(app.normalize_record_to('littledude@coxresearch.com'), 'littledude@mail.grokbot.com')

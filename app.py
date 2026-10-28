@@ -209,7 +209,8 @@ REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'ref
 AMEX_CATEGORY_GROUPS = (
     ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
     ('Travel', ('Travel', 'Travel Fuel')),
-    ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance')),
+    ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
+    ('Auto Maintenance', ('Auto Maintenance',)),
 )
 AMEX_CATEGORIES = tuple(name for _label, names in AMEX_CATEGORY_GROUPS for name in names)
 
@@ -422,6 +423,45 @@ def send_email(subj, body, text):
     msg = EmailMessage(); msg['Subject'] = subj; msg['From'] = MAIL_FROM; msg['To'] = ', '.join(to)
     if cc: msg['Cc'] = ', '.join(cc)
     msg.set_content(text); msg.add_alternative(body, subtype='html')
+    return send_prepared(msg)
+
+FLAG_REVIEW_SUBJECT = 'Review your flagged charges'
+
+def employee_address(emp):
+    """Address on the employee record. send_to wins; Alice's record is already locked to Chris."""
+    if not isinstance(emp, dict):
+        return ''
+    return str(emp.get('send_to') or emp.get('email') or '').strip()
+
+def flag_review_bodies(doc, flagged):
+    """One message listing every flagged charge. Not the filing record."""
+    lines = []
+    for r in flagged:
+        lines.append(' | '.join([
+            str(r.get('date') or ''),
+            str(r.get('company') or ''),
+            money(r.get('amount') or 0),
+            str(r.get('amex_category') or r.get('category') or ''),
+            str(r.get('note') or ''),
+        ]))
+    text = ("Review your flagged charges.\n" + ''.join(f"  {line}\n" for line in lines))
+    items = ''.join(f"<li>{html.escape(line)}</li>" for line in lines)
+    body = (f"<div style='font-family:Arial,Helvetica,sans-serif'><p><b>Review your flagged charges</b> "
+            f"({html.escape(str((doc or {}).get('label') or ''))}).</p><ul>{items}</ul></div>")
+    return text, body
+
+def send_flag_review(doc, emp, flagged):
+    """One email to the employee. Raises only after the caller has already sent the filing record."""
+    addr = employee_address(emp)
+    if not addr:
+        raise ValueError('no employee email on record')
+    text, body = flag_review_bodies(doc, flagged)
+    msg = EmailMessage()
+    msg['Subject'] = FLAG_REVIEW_SUBJECT
+    msg['From'] = MAIL_FROM
+    msg['To'] = addr
+    msg.set_content(text)
+    msg.add_alternative(body, subtype='html')
     return send_prepared(msg)
 
 # ---------- page ----------
@@ -765,6 +805,15 @@ def submit(token):
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
                   'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
+          # After the filing record. A failure here does not change the submit.
+          if flagged:
+              addr = employee_address(e)
+              try:
+                  freview = send_flag_review(doc, e, flagged)
+              except Exception as ex:
+                  freview = f'error: {type(ex).__name__}: {ex}'
+              append({'type': 'flag_review_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
+                      'ts': now(), 'to': addr, 'count': len(flagged), 'status': freview})
     return redirect(f'/v/{token}', 303)
 
 @app.post('/v/<token>/comment')
