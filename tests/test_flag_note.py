@@ -132,8 +132,14 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.canonical_category(' travel '), 'Travel')
         self.assertEqual(app.canonical_category('Meals'), '')
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
-            'Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-            'Business Services', 'Other', 'Entertainment', 'Communications'))
+            'Supplies', 'Job Materials', 'Utilities', 'Office Expenses',
+            'Office Expenses:Software', 'Office Expenses:Computers & other office equipment',
+            'Dues & Subscriptions', 'Auto Allowance:Fuel', 'Auto Maintenance',
+            'Shipping, Delivery Expense', 'Freight & Delivery', 'Meals and Entertainment',
+            'Travel', 'Travel Fuel', 'Travel:Flights', 'Travel Meals', 'Travel:Parking',
+            'Advertising/Promotional:Promotional Items', 'Advertising/Promotional:Trade Show',
+            'Advertising/Promotional:Website', 'Advertising/Promotional:Promotional Meals',
+            'Repair & Maintenance', 'Gift', 'Equipment Rental', 'Other'))
 
     def test_sample_page_and_record_email(self):
         amazon = self.flag(1, 'not my charge')
@@ -151,9 +157,9 @@ class FlagNoteTest(unittest.TestCase):
         saved = self.client.post(f'/v/{self.token}/comment', data={'comment': 'wrong category'},
                                  headers={'Accept': 'application/json'})
         self.assertEqual(saved.get_json()['comment'], 'wrong category')
-        cat = self.client.post(f'/v/{self.token}/category/4', data={'category': 'restaurant'},
+        cat = self.client.post(f'/v/{self.token}/category/4', data={'category': 'meals and entertainment'},
                                headers={'Accept': 'application/json'})
-        self.assertEqual(cat.get_json()['category'], 'Restaurant')
+        self.assertEqual(cat.get_json()['category'], 'Meals and Entertainment')
         rejected = self.client.post(f'/v/{self.token}/category/4', data={'category': 'Meals'},
                                     headers={'Accept': 'application/json'})
         self.assertEqual(rejected.status_code, 400)
@@ -168,7 +174,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('>wrong category</textarea>', page)
         self.assertIn('>Flagged charges</label>', page)
         self.assertIn("data-orig='Travel'", page)
-        self.assertIn("<span class='edited ed-cat'>Restaurant</span><s class='orig'>Meals</s>", page)
+        self.assertIn("<span class='edited ed-cat'>Meals and Entertainment</span><s class='orig'>Meals</s>", page)
         for name in app.AMEX_CATEGORIES:
             self.assertIn(json.dumps(name), page)
 
@@ -221,7 +227,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn(html.escape(LINE_NOTE), flagged_html)
         self.assertNotIn('AMAZON MARKETPLACE', approved_html)
         self.assertIn('JOE&#x27;S DINER', approved_html)
-        self.assertIn('Restaurant', approved_html)
+        self.assertIn('Meals and Entertainment', approved_html)
         self.assertNotIn(LINE_NOTE, approved_html)
 
         sample = (

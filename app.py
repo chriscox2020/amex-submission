@@ -205,8 +205,14 @@ def sorted_rows(rows):
 
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
-AMEX_CATEGORIES = ('Merchandise & Supplies', 'Transportation', 'Restaurant', 'Travel',
-                   'Business Services', 'Other', 'Entertainment', 'Communications')
+AMEX_CATEGORIES = ('Supplies', 'Job Materials', 'Utilities', 'Office Expenses',
+                   'Office Expenses:Software', 'Office Expenses:Computers & other office equipment',
+                   'Dues & Subscriptions', 'Auto Allowance:Fuel', 'Auto Maintenance',
+                   'Shipping, Delivery Expense', 'Freight & Delivery', 'Meals and Entertainment',
+                   'Travel', 'Travel Fuel', 'Travel:Flights', 'Travel Meals', 'Travel:Parking',
+                   'Advertising/Promotional:Promotional Items', 'Advertising/Promotional:Trade Show',
+                   'Advertising/Promotional:Website', 'Advertising/Promotional:Promotional Meals',
+                   'Repair & Maintenance', 'Gift', 'Equipment Rental', 'Other')
 
 def clean_note(raw):
     """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
