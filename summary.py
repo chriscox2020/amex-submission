@@ -306,6 +306,89 @@ def build_pdf(summary):
     return bytes(out)
 
 
+def pdf_from_lines(lines):
+    """Helvetica PDF of plain text lines."""
+    return _pdf_document(lines)
+
+
+def _pdf_document(lines):
+    pages = [lines[i:i + 46] for i in range(0, len(lines), 46)] or [[]]
+    objects = []
+
+    def add(body):
+        objects.append(body)
+        return len(objects)
+
+    font_id = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    content_ids = []
+    for chunk in pages:
+        commands = ['BT', '/F1 11 Tf', '50 760 Td', '14 TL']
+        for line in chunk:
+            commands.append(f'({_pdf_escape(line)}) Tj')
+            commands.append('T*')
+        commands.append('ET')
+        stream = '\n'.join(commands).encode('latin-1', 'replace') + b'\n'
+        header = f'<< /Length {len(stream)} >>\nstream\n'.encode('latin-1')
+        content_ids.append(add(header + stream + b'endstream'))
+    pages_id = len(objects) + len(content_ids) + 1
+    page_ids = []
+    for content_id in content_ids:
+        page_body = (f'<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] '
+                     f'/Contents {content_id} 0 R /Resources << /Font << /F1 {font_id} 0 R >> >> >>')
+        page_ids.append(add(page_body))
+    kids_ref = ' '.join(f'{pid} 0 R' for pid in page_ids)
+    real_pages = add(f'<< /Type /Pages /Kids [{kids_ref}] /Count {len(page_ids)} >>')
+    if real_pages != pages_id:
+        raise RuntimeError('pdf page tree id mismatch')
+    catalog = add(f'<< /Type /Catalog /Pages {real_pages} 0 R >>')
+    out = bytearray(b'%PDF-1.4\n')
+    offsets = [0]
+    for num, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        if isinstance(body, str):
+            body = body.encode('latin-1')
+        out += f'{num} 0 obj\n'.encode('latin-1') + body + b'\nendobj\n'
+    xref = len(out)
+    out += f'xref\n0 {len(objects) + 1}\n'.encode('latin-1')
+    out += b'0000000000 65535 f \n'
+    for offset in offsets[1:]:
+        out += f'{offset:010d} 00000 n \n'.encode('latin-1')
+    out += (f'trailer\n<< /Size {len(objects) + 1} /Root {catalog} 0 R >>\n'
+            f'startxref\n{xref}\n%%EOF\n').encode('latin-1')
+    return bytes(out)
+
+
+def table_xlsx(rows, sheet_name='Charges'):
+    """Spreadsheet of one table. Does not call any outside service."""
+    sheet = _xlsx_sheet(rows)
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    workbook = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="{xml_escape(sheet_name)}" sheetId="1" r:id="rId1"/></sheets></workbook>"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('[Content_Types].xml', content_types)
+        zf.writestr('_rels/.rels', rels)
+        zf.writestr('xl/workbook.xml', workbook)
+        zf.writestr('xl/_rels/workbook.xml.rels', workbook_rels)
+        zf.writestr('xl/worksheets/sheet1.xml', sheet)
+    return buf.getvalue()
+
+
 def summary_filename(summary, ext):
     """Saved and attached as 'American Express charges October 2026 - Summary.pdf'."""
     return f"{summary['period']['folder_label']} - Summary.{ext}"

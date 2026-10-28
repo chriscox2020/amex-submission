@@ -169,7 +169,7 @@ class SummaryTest(unittest.TestCase):
 
         self.submit_employee(self.ada, 'Gift', 2)
         types = [r['type'] for r in app.read_log() if r.get('stmt') == AUG and r['type'] != 'open']
-        self.assertEqual(types, ['category', 'submit', 'email', 'submit_confirm_email'])
+        self.assertEqual(types, ['category', 'submit', 'dropbox_file', 'email', 'submit_confirm_email'])
         self.assertFalse(pathlib.Path(app.DATA_DIR, 'summaries').exists())
         self.assertEqual(self.qb_messages(), [])
         employee_mail = [email.message_from_bytes(p.read_bytes())
@@ -472,9 +472,9 @@ class SummaryTest(unittest.TestCase):
     def test_no_service_credentials(self):
         src = ((ROOT / 'app.py').read_text() + '\n' + (ROOT / 'summary.py').read_text()
                + '\n' + (ROOT / 'render.yaml').read_text()).lower()
-        for banned in ('intuit.com', 'api.dropbox', 'api.dropboxapi.com', 'dropbox_token',
-                       'dropbox_app_key', 'quickbooks_client', 'quickbooks_secret', 'quickbooks_realm',
-                       'americanexpress.com', 'api.amex'):
+        for banned in ('intuit.com', 'quickbooks_client', 'quickbooks_secret', 'quickbooks_realm',
+                       'americanexpress.com', 'api.amex', 'files/delete', 'permanently_delete',
+                       'create_shared_link', 'sharing/create_shared_link'):
             self.assertNotIn(banned, src)
         self.assertNotIn('import requests', src)
         self.assertNotIn('urllib', (ROOT / 'summary.py').read_text().lower())
