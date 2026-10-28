@@ -205,14 +205,13 @@ def sorted_rows(rows):
 
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
-AMEX_CATEGORIES = ('Supplies', 'Job Materials', 'Utilities', 'Office Expenses',
-                   'Office Expenses:Software', 'Office Expenses:Computers & other office equipment',
-                   'Dues & Subscriptions', 'Auto Allowance:Fuel', 'Auto Maintenance',
-                   'Shipping, Delivery Expense', 'Freight & Delivery', 'Meals and Entertainment',
-                   'Travel', 'Travel Fuel', 'Travel:Flights', 'Travel Meals', 'Travel:Parking',
-                   'Advertising/Promotional:Promotional Items', 'Advertising/Promotional:Trade Show',
-                   'Advertising/Promotional:Website', 'Advertising/Promotional:Promotional Meals',
-                   'Repair & Maintenance', 'Gift', 'Equipment Rental', 'Other')
+# Employee dropdown groups. Headings are optgroup labels and are not categories.
+AMEX_CATEGORY_GROUPS = (
+    ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
+    ('Travel', ('Travel', 'Travel Fuel')),
+    ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance')),
+)
+AMEX_CATEGORIES = tuple(name for _label, names in AMEX_CATEGORY_GROUPS for name in names)
 
 def clean_note(raw):
     """Optional flag reason: one line, trimmed, capped at NOTE_MAX characters."""
@@ -315,11 +314,32 @@ def canonical_category(value):
         if c.casefold() == key: return c
     return ''
 
+def display_category(row, categories):
+    """Category shown for this charge. An edit wins. Otherwise the statement text, unchanged when it is not on the list."""
+    if isinstance(categories, dict) and row.get('id') in categories:
+        return str(categories.get(row['id']) or '')
+    raw = str(row.get('category') or '').strip()
+    return canonical_category(raw) or raw
+
+def accept_category(raw, row, categories):
+    """A list category, or this charge's current off-list value kept exactly. None when rejected.
+    Empty stays empty. Nothing here substitutes a default category."""
+    choice = canonical_category(raw)
+    if choice:
+        return choice
+    kept = str(raw or '').strip()
+    if not kept:
+        return ''
+    current = display_category(row, categories)
+    if kept == current:
+        return current
+    return None
+
 def chosen_category(row, categories):
-    """Dropdown choice when the employee set one, otherwise a matching original category."""
+    """Dropdown choice when the employee set one, otherwise the statement category."""
     if isinstance(categories, dict) and row.get('id') in categories:
         return categories[row['id']] or ''
-    return canonical_category(row.get('category'))
+    return display_category(row, categories)
 
 def flag_comment_line(comment):
     comment = clean_note(comment)
@@ -422,12 +442,10 @@ tr.f td{background:#ffecec}tr.ed td{background:#e3f0ff}tr.cr td{background:#f3fb
 label.boxlabel{display:block;font-weight:bold;margin:24px 0 6px}
 #fcb{width:100%;box-sizing:border-box;height:110px;font-size:20px;border:2px solid #333;padding:8px}
 #flaglist{margin:16px 0 0;padding-left:18px}#flaglist li,.done li{margin:6px 0;font-size:15px;line-height:1.4}
-td.cat{position:relative;cursor:pointer}td.cat:hover{outline:2px solid #69c}
-.edited{font-weight:bold}.ed-cat{color:#06c}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
+td.cat{position:relative}td.cat:hover{outline:2px solid #69c}
+select.catsel{font:inherit;font-size:16px;max-width:100%}
+.edited{font-weight:bold}.ed-cat{color:#06c;font-weight:bold}.ed-note{color:#d00}.rsn{font-size:16px;margin-top:2px}
 s.orig{display:block;font-size:14px;color:#888;font-weight:normal}
-.dd{position:absolute;left:0;top:100%;z-index:6;width:min(300px,80vw);background:#fff;border:2px solid #333;box-shadow:2px 2px 8px #888;text-align:left}
-.ddh{font-weight:bold;padding:6px 10px;background:#eee;font-size:17px}.ddo{padding:6px 10px;font-size:18px;border-top:1px solid #ddd;cursor:pointer}
-.ddo:hover{background:#e3f0ff}.ddo.cur{font-weight:bold}.ddo.cx{color:#a00}
 .crn{color:#080;font-weight:bold}.crl{font-size:14px;color:#080;font-weight:bold;border:1px solid #080;border-radius:4px;padding:1px 6px;margin-left:6px}
 tr.ft td{background:#f6f6f6;font-size:22px}tr.net td{font-weight:bold;font-size:24px;background:#eaeaea}
 .done{background:#e8f5e9;border:1px solid #2e7d32;border-radius:8px;padding:14px 16px;font-size:16px;margin:0 0 16px}
@@ -435,44 +453,35 @@ tr.ft td{background:#f6f6f6;font-size:22px}tr.net td{font-weight:bold;font-size:
 .prt{margin-top:24px;margin-left:12px;font-size:28px;padding:14px 50px;background:#fff;color:#333;border:2px solid #333;border-radius:6px;cursor:pointer}
 @media(max-width:700px){body{font-size:15px}.banner{font-size:28px;padding:16px 8px}h1{font-size:26px;margin:0 8px 12px}.sheet{margin:0 8px 24px}
 td,th{padding:6px}.sub,.prt{font-size:20px;padding:12px 22px}#fcb{height:80px;font-size:16px}tr.ft td,tr.net td{font-size:16px}}
-@media print{button,.pop,.dd{display:none!important}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
+@media print{button,.pop{display:none!important}select.catsel{-webkit-appearance:none;appearance:none;border:0;background:transparent;color:inherit}body{margin:10mm;font-size:12pt}.banner{font-size:22pt}
 tr{page-break-inside:avoid}td,th{padding:4px 6px}#fcb{height:60px}tr.ft td{font-size:12pt}tr.net td{font-size:13pt}
 *{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 """
 
-JS = r"""var CATS=__CATS__;
-function closeDD(){document.querySelectorAll('.dd').forEach(function(d){d.remove()})}
-function markEdited(el,v,orig,cls){
-  if(v===orig){el.textContent=orig;return false}
-  el.textContent='';
-  var n=document.createElement('span');n.className='edited '+cls;n.textContent=v;el.appendChild(n);
-  if(orig){var s=document.createElement('s');s.className='orig';s.textContent=orig;el.appendChild(s)}
-  return true}
-function openCat(td,ev){
-  if(ev.target.closest('.dd'))return;
-  closeDD();
-  var d=document.createElement('div');d.className='dd';
-  var h=document.createElement('div');h.className='ddh';h.textContent='Pick category';d.appendChild(h);
-  CATS.forEach(function(o){
-    var item=document.createElement('div');
-    item.className='ddo'+(o===(td.getAttribute('data-cur')||'')?' cur':'');
-    item.textContent=o;d.appendChild(item)});
-  var cx=document.createElement('div');cx.className='ddo cx';cx.textContent='Cancel';d.appendChild(cx);
-  d.addEventListener('click',function(e){
-    e.stopPropagation();
-    var o=e.target.closest('.ddo');if(!o)return;
-    if(!o.classList.contains('cx'))setCat(td,o.textContent);
-    closeDD()});
-  td.appendChild(d)}
-function setCat(td,v){
+JS = r"""function paintCat(sel,v){
+  var td=sel.closest('td');if(!td)return;
   var orig=td.getAttribute('data-orig')||'';
-  fetch(td.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
-    if(!r.ok)return;
-    var changed=markEdited(td,v,orig,'ed-cat');
-    td.setAttribute('data-cur',v);
-    td.parentNode.classList.toggle('ed',!!changed);
-  })}
-document.addEventListener('click',function(e){if(!e.target.closest('td.cat'))closeDD()});
+  td.setAttribute('data-cur',v);
+  sel.setAttribute('data-cur',v);
+  var old=td.querySelector('s.orig');
+  var changed=v!==orig;
+  sel.classList.toggle('ed-cat',changed);
+  if(changed){
+    if(!old){old=document.createElement('s');old.className='orig';td.appendChild(old)}
+    old.textContent=orig;
+  }else if(old)old.remove();
+  if(td.parentNode)td.parentNode.classList.toggle('ed',changed);
+}
+document.querySelectorAll('select.catsel').forEach(function(sel){
+  sel.addEventListener('change',function(){
+    var prev=sel.getAttribute('data-cur');
+    if(prev==null)prev=sel.value;
+    var v=sel.value;
+    fetch(sel.getAttribute('data-action'),{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'category='+encodeURIComponent(v)}).then(function(r){
+      if(!r.ok){sel.value=prev;return}
+      paintCat(sel,v);
+    }).catch(function(){sel.value=prev});
+  })});
 var pop=document.getElementById('pop');
 function closePop(){pop.hidden=true;if(pop.parentNode!==document.body)document.body.appendChild(pop)}
 function paintMerchant(tr,flagged,note){
@@ -527,7 +536,7 @@ function savePop(){
   postFlag(btn,reason,pop.querySelector('textarea').value.slice(0,500),true)}
 document.querySelectorAll('button.fb').forEach(function(b){b.addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();openPop(b)})});
 document.getElementById('popsave').addEventListener('click',function(ev){ev.preventDefault();ev.stopPropagation();savePop()});
-document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pop.hidden){ev.preventDefault();closePop()}closeDD()}});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pop.hidden){ev.preventDefault();closePop()}}});
 var commentBox=document.getElementById('fcb');
 if(commentBox&&commentBox.getAttribute('data-action')){
   var commentTimer=null;
@@ -539,16 +548,37 @@ if(commentBox&&commentBox.getAttribute('data-action')){
 """
 
 def category_view(row, categories):
-    """Current Amex category, the statement original, and whether the employee changed it."""
+    """Current category, the statement original, and whether the employee changed it."""
     original = str(row.get('category') or '')
     explicit = isinstance(categories, dict) and row.get('id') in categories
-    if explicit:
-        current = categories.get(row['id']) or ''
-    else:
-        current = canonical_category(original) or original
-    baseline = canonical_category(original) or original
-    edited = bool(explicit and (current or '') != baseline)
+    current = display_category(row, categories)
+    baseline = canonical_category(original) or original.strip()
+    edited = bool(explicit and (current or '') != (baseline or ''))
     return current, original, edited
+
+def category_select(current, token, row_id, edited):
+    """Every charge can pick any list category. An off-list stored value stays selected as '(current)'."""
+    esc = html.escape
+    cur = str(current or '')
+    known = False
+    groups = []
+    for label, names in AMEX_CATEGORY_GROUPS:
+        opts = []
+        for name in names:
+            selected = cur.casefold() == name.casefold()
+            if selected:
+                known = True
+            sel = ' selected' if selected else ''
+            opts.append(f"<option value='{esc(name)}'{sel}>{esc(name)}</option>")
+        groups.append(f"<optgroup label='{esc(label)}'>{''.join(opts)}</optgroup>")
+    prefix = ''
+    if not cur:
+        prefix = "<option value='' selected></option>"
+    elif not known:
+        prefix = f"<option value='{esc(cur)}' selected>{esc(cur)} (current)</option>"
+    cls = 'catsel ed-cat' if edited else 'catsel'
+    return (f"<select class='{cls}' data-cur='{esc(cur)}' data-action='/v/{token}/category/{int(row_id)}'>"
+            f"{prefix}{''.join(groups)}</select>")
 
 def popup_html():
     chips = []
@@ -593,14 +623,12 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
         on = (not credit) and (rid in flags)
         current, original, edited = category_view(r, categories)
         shown = current or original
-        if edited and not credit:
-            strike = f"<s class='orig'>{esc(original)}</s>" if original and original != current else ''
-            inner = f"<span class='edited ed-cat'>{esc(current)}</span>{strike}"
-        else:
+        if credit or locked:
             inner = esc(shown)
+        else:
+            strike = f"<s class='orig'>{esc(original)}</s>" if edited and original and original != current else ''
+            inner = category_select(current, token, rid, edited) + strike
         cat_cls = '' if credit or locked else " class='cat'"
-        cat_click = '' if credit or locked else " onclick='openCat(this,event)'"
-        cat_action = '' if credit or locked else f" data-action='/v/{token}/category/{rid}'"
         tr_cls = []
         if credit: tr_cls.append('cr')
         if on: tr_cls.append('f')
@@ -626,7 +654,7 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
                     f"title='{'Flagged' if on else 'Flag'}'{dis}>{'&#9873;' if on else '&#9872;'}</button>")
         parts.append(f"<tr{cls_attr} data-id='{rid}' data-merchant='{esc(r['company'])}'><td>{esc(r['date'])}</td>"
                      f"<td>{''.join(merchant)}</td><td class='n'>{amount}</td>"
-                     f"<td{cat_cls} data-orig='{esc(original)}' data-cur='{esc(shown)}'{cat_action}{cat_click}>{inner}</td>"
+                     f"<td{cat_cls} data-orig='{esc(original)}' data-cur='{esc(shown)}'>{inner}</td>"
                      f"<td class='c fc'>{flag}</td></tr>")
     parts.append(f"<tr class='ft'><td colspan='2'>Total charges</td><td class='n'>{money(tot_ch)}</td><td colspan='2'></td></tr>"
                  f"<tr class='ft'><td colspan='2'>Credits</td><td class='n'>{credit_cell}</td><td colspan='2'></td></tr>"
@@ -641,8 +669,7 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
                      f"<button class='prt' type='button' onclick='window.print()'>Print</button>")
     else:
         parts.append("<button class='prt' type='button' onclick='window.print()'>Print</button>")
-    script = JS.replace('__CATS__', json.dumps(list(AMEX_CATEGORIES)))
-    parts.append(popup_html() + f"<script>{script}</script></div></body></html>")
+    parts.append(popup_html() + f"<script>{JS}</script></div></body></html>")
     return ''.join(parts)
 def nice(ts):
     return datetime.fromisoformat(ts).strftime('%b %-d, %Y %-I:%M %p') + ' CT'
@@ -771,8 +798,8 @@ def set_category(token, row):
     if sub: return jsonify(error='already submitted'), 409
     raw = posted_field('category')
     if raw is None: return jsonify(error='missing category'), 400
-    choice = canonical_category(raw)
-    if str(raw).strip() and not choice: return jsonify(error='invalid category'), 400
+    choice = accept_category(raw, r, _categories)
+    if choice is None: return jsonify(error='invalid category'), 400
     append({'type': 'category', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'row': row,
             'date': r['date'], 'category': choice, 'company': r['company'], 'amount': r['amount'], **meta()})
     if 'application/json' in request.headers.get('Accept', ''):

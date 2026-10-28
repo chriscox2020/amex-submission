@@ -21,6 +21,7 @@ os.environ['MAIL_FROM'] = 'Chris AI <littledude@coxresearch.com>'
 import sys
 sys.path.insert(0, str(ROOT))
 import app
+import summary
 
 STMT = '2026-10-22'
 EMP = 'sample-employee'
@@ -107,7 +108,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn(">Flagged charges</label>", page)
         self.assertIn("id='fcb'", page)
         self.assertIn(">Print</button>", page)
-        self.assertIn("button,.pop,.dd{display:none!important}", page)
+        self.assertIn("button,.pop{display:none!important}", page)
         self.assertIn(f"/v/{self.token}/flag/1", page)
         self.assertNotIn('Note:', page)
         self.assertNotIn('Submit to QuickBooks for Pay', page)
@@ -131,15 +132,17 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.flag_comment_line('   '), '')
         self.assertEqual(app.canonical_category(' travel '), 'Travel')
         self.assertEqual(app.canonical_category('Meals'), '')
+        self.assertEqual(app.AMEX_CATEGORY_GROUPS, (
+            ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
+            ('Travel', ('Travel', 'Travel Fuel')),
+            ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance')),
+        ))
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
-            'Supplies', 'Job Materials', 'Utilities', 'Office Expenses',
-            'Office Expenses:Software', 'Office Expenses:Computers & other office equipment',
-            'Dues & Subscriptions', 'Auto Allowance:Fuel', 'Auto Maintenance',
-            'Shipping, Delivery Expense', 'Freight & Delivery', 'Meals and Entertainment',
-            'Travel', 'Travel Fuel', 'Travel:Flights', 'Travel Meals', 'Travel:Parking',
-            'Advertising/Promotional:Promotional Items', 'Advertising/Promotional:Trade Show',
-            'Advertising/Promotional:Website', 'Advertising/Promotional:Promotional Meals',
-            'Repair & Maintenance', 'Gift', 'Equipment Rental', 'Other'))
+            'Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
+            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance'))
+        self.assertEqual(tuple(summary.AMEX_CATEGORIES), tuple(app.AMEX_CATEGORIES))
+        self.assertNotIn('Other', app.AMEX_CATEGORIES)
+        self.assertNotIn('Other Expense', app.AMEX_CATEGORIES)
 
     def test_sample_page_and_record_email(self):
         amazon = self.flag(1, 'not my charge')
@@ -174,9 +177,15 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('>wrong category</textarea>', page)
         self.assertIn('>Flagged charges</label>', page)
         self.assertIn("data-orig='Travel'", page)
-        self.assertIn("<span class='edited ed-cat'>Meals and Entertainment</span><s class='orig'>Meals</s>", page)
+        self.assertIn("<option value='Meals and Entertainment' selected>Meals and Entertainment</option>", page)
+        self.assertIn("<s class='orig'>Meals</s>", page)
+        self.assertIn("<optgroup label='Office'>", page)
+        self.assertIn("<optgroup label='Travel'>", page)
+        self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertNotIn("<option value='Office'", page)
+        self.assertNotIn("<option value='Shop Supplies'", page)
         for name in app.AMEX_CATEGORIES:
-            self.assertIn(json.dumps(name), page)
+            self.assertIn(f"<option value='{html.escape(name)}'", page)
 
         submitted = self.client.post(f'/v/{self.token}/submit', data={'comment': 'wrong category'})
         self.assertEqual(submitted.status_code, 303)
@@ -299,9 +308,10 @@ class FlagNoteTest(unittest.TestCase):
         self.flag(1, 'n')
         nasty = 'a <b> & "q"'
         self.client.post(f'/v/{self.token}/comment', data={'comment': nasty}, headers={'Accept': 'application/json'})
-        self.client.post(f'/v/{self.token}/category/1', data={'category': '=Other'}, headers={'Accept': 'application/json'})
-        self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Other'},
-                                          headers={'Accept': 'application/json'}).get_json()['category'], 'Other')
+        self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': '=Other'},
+                                          headers={'Accept': 'application/json'}).status_code, 400)
+        self.assertEqual(self.client.post(f'/v/{self.token}/category/1', data={'category': 'Gift'},
+                                          headers={'Accept': 'application/json'}).get_json()['category'], 'Gift')
         self.client.post(f'/v/{self.token}/submit', data={'comment': nasty})
         msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
         text = html_body = ''
@@ -326,6 +336,62 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(self.client.post('/v/AAAAAAAAAAAAAAAAAAAAAAAA/category/1', data={'category': 'Travel'},
                                           headers={'Accept': 'application/json'}).status_code, 404)
         self.assertEqual(len(app.read_log()), before)
+
+    def test_off_list_category_stays_selected_and_submits(self):
+        """A stored category that is no longer on the list stays selected and is kept on submit."""
+        bundled = ROOT / 'statements' / 'bundled' / '2026-09-22.json'
+        digest = hashlib.sha256(bundled.read_bytes()).hexdigest()
+        page = self.page()
+        self.assertIn("<optgroup label='Office'>", page)
+        self.assertIn("<optgroup label='Travel'>", page)
+        self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertNotIn("<option value='Office'", page)
+        self.assertNotIn("<option value='Shop Supplies'", page)
+        self.assertNotIn("<option value='Other'", page)
+        self.assertNotIn("<option value='Other Expense'", page)
+        self.assertNotIn("<option value='Equipment Rental'", page)
+        self.assertIn("<option value='Office supplies' selected>Office supplies (current)</option>", page)
+        self.assertIn("<option value='Meals' selected>Meals (current)</option>", page)
+        self.assertIn("<option value='Travel' selected>Travel</option>", page)
+        self.assertNotIn('Travel (current)', page)
+        for name in app.AMEX_CATEGORIES:
+            self.assertIn(f"<option value='{html.escape(name)}'", page)
+
+        rejected = self.client.post(f'/v/{self.token}/category/1', data={'category': 'Equipment Rental'},
+                                    headers={'Accept': 'application/json'})
+        self.assertEqual(rejected.status_code, 400)
+        kept = self.client.post(f'/v/{self.token}/category/1', data={'category': 'Office supplies'},
+                                headers={'Accept': 'application/json'})
+        self.assertEqual(kept.status_code, 200)
+        self.assertEqual(kept.get_json()['category'], 'Office supplies')
+        still = self.page()
+        self.assertIn("<option value='Office supplies' selected>Office supplies (current)</option>", still)
+
+        submitted = self.client.post(f'/v/{self.token}/submit')
+        self.assertEqual(submitted.status_code, 303)
+        done = self.page()
+        self.assertNotIn('<select', done)
+        self.assertIn('Office supplies', done)
+        self.assertIn('Meals', done)
+        self.assertNotIn('(current)', done)
+        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        html_body = ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/html':
+                html_body = part.get_payload(decode=True).decode()
+        self.assertIn(
+            "<td style='padding:4px 8px'>Office supplies</td>"
+            "<td style='padding:4px 8px'>AMAZON MARKETPLACE</td>"
+            "<td style='padding:4px 8px;text-align:right'>$1,234.50</td>"
+            "<td style='padding:4px 8px'>Office supplies</td>",
+            html_body)
+        self.assertIn(
+            "<td style='padding:4px 8px'>Meals</td>"
+            "<td style='padding:4px 8px'>JOE&#x27;S DINER</td>"
+            "<td style='padding:4px 8px;text-align:right'>$27.50</td>"
+            "<td style='padding:4px 8px'>Meals</td>",
+            html_body)
+        self.assertEqual(hashlib.sha256(bundled.read_bytes()).hexdigest(), digest)
 
     def test_record_address_credits_and_alice_routing(self):
         self.assertEqual(app.normalize_record_to('littledude@coxresearch.com'), 'littledude@mail.grokbot.com')
