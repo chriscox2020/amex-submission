@@ -16,7 +16,7 @@ The app uploads with `files/upload` (`mode` add, `autorename` true). It never ov
 
 On the app **Permissions** tab, enable:
 
-- `files.content.write` — upload the PDF, spreadsheet, and combined chart
+- `files.content.write` — upload the employee PDF and spreadsheet
 - `files.content.read` — read file content for this app
 - `files.metadata.read` — see folders and file names
 
@@ -54,4 +54,4 @@ Leave them out of the repo. If any of the three is missing, or an upload fails, 
 - Employee PDF and spreadsheet: `/Chris's AI/American Express charges/<Month D>/<Employee Name>/`
   Example folder: `October 22`.
   Example file: `Ada - Amex October 2026 - submitted 2026-10-21 0930 CT.pdf`
-- Combined chart for that statement: `/Chris's AI/American Express charges/Combined chart - Amex October 2026.pdf` and `.xlsx` (top of `American Express charges`, not inside the closing-date folder).
+- The app does not build or upload a combined chart. Chris builds that manually.
