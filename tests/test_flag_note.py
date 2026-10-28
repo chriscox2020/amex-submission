@@ -135,11 +135,11 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.AMEX_CATEGORY_GROUPS, (
             ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
             ('Travel', ('Travel', 'Travel Fuel')),
-            ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance')),
+            ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance')),
         ))
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
             'Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance'))
+            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance'))
         self.assertEqual(tuple(summary.AMEX_CATEGORIES), tuple(app.AMEX_CATEGORIES))
         self.assertNotIn('Other', app.AMEX_CATEGORIES)
         self.assertNotIn('Other Expense', app.AMEX_CATEGORIES)
