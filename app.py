@@ -469,6 +469,30 @@ def send_flag_review(doc, emp, flagged):
     msg.add_alternative(body, subtype='html')
     return send_prepared(msg)
 
+SUBMIT_CONFIRM_SUBJECT = 'Your American Express charges were submitted'
+
+def submit_confirm_text(doc, rows, ts):
+    """Plain confirmation: statement month, charge count, total, and Central Time."""
+    month = summary.statement_period(doc)['month_label']
+    count = len(rows or [])
+    total = money(sum(float(r.get('amount') or 0) for r in (rows or [])))
+    noun = 'charge' if count == 1 else 'charges'
+    return (f"You submitted your American Express charges for {month}.\n"
+            f"{count} {noun}, total {total}.\n"
+            f"{nice(ts)}\n")
+
+def send_submit_confirm(doc, emp, rows, ts):
+    """Brief plain note to the employee. Caller already sent the filing record."""
+    addr = employee_address(emp)
+    if not addr:
+        raise ValueError('no employee email on record')
+    msg = EmailMessage()
+    msg['Subject'] = SUBMIT_CONFIRM_SUBJECT
+    msg['From'] = MAIL_FROM
+    msg['To'] = addr
+    msg.set_content(submit_confirm_text(doc, rows, ts))
+    return send_prepared(msg)
+
 # ---------- page ----------
 CSS = """body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif;font-size:20px}
 .banner{background:#006fcf;color:#fff;font-size:44px;font-weight:bold;text-align:center;padding:22px 12px;margin:0 0 18px;width:100%;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
@@ -895,6 +919,14 @@ def submit(token):
               status = f'error: {type(ex).__name__}: {ex}'
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
                   'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
+          # After the filing record. A failure here does not change that record or the submit.
+          addr = employee_address(e)
+          try:
+              cstatus = send_submit_confirm(doc, e, rows, rec['ts'])
+          except Exception as ex:
+              cstatus = f'error: {type(ex).__name__}: {ex}'
+          append({'type': 'submit_confirm_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
+                  'ts': now(), 'to': addr, 'count': len(rows), 'status': cstatus})
           # After the filing record. A failure here does not change the submit.
           if flagged:
               addr = employee_address(e)

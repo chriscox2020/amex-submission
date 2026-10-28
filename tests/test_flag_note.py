@@ -415,7 +415,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn('Office supplies', done)
         self.assertIn('Meals', done)
         self.assertNotIn('(current)', done)
-        msg = email.message_from_bytes(next(pathlib.Path(app.OUTBOX).glob('*.eml')).read_bytes())
+        msg = self.messages_with_subject('Amex verification SUBMITTED:')[0]
         html_body = ''
         for part in msg.walk():
             if part.get_content_type() == 'text/html':
@@ -434,6 +434,64 @@ class FlagNoteTest(unittest.TestCase):
             html_body)
         self.assertEqual(hashlib.sha256(bundled.read_bytes()).hexdigest(), digest)
 
+    def test_submit_confirm_email_is_plain_and_nonblocking(self):
+        calls = []
+        real = app.send_prepared
+
+        def capture(msg):
+            calls.append(msg)
+            return 'mocked'
+
+        app.send_prepared = capture
+        try:
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+        finally:
+            app.send_prepared = real
+        self.assertEqual([''.join(str(m['Subject']).splitlines()) for m in calls], [
+            'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 0 flagged',
+            'Your American Express charges were submitted',
+        ])
+        record, confirm = calls
+        self.assertEqual(record['To'], 'littledude@mail.grokbot.com')
+        self.assertEqual(confirm['To'], 'sample@coxresearch.com')
+        self.assertEqual(confirm['From'], app.MAIL_FROM)
+        self.assertIsNone(confirm['Cc'])
+        self.assertEqual(confirm.get_content_type(), 'text/plain')
+        text = confirm.get_content()
+        self.assertIn('You submitted your American Express charges for October 2026.', text)
+        self.assertIn('4 charges, total $1,598.65.', text)
+        self.assertIn('Oct 21, 2026 9:30 AM CT', text)
+
+        os.remove(app.LOG)
+        calls.clear()
+
+        def fail_confirm(msg):
+            calls.append(msg)
+            if ''.join(str(msg['Subject']).splitlines()) == app.SUBMIT_CONFIRM_SUBJECT:
+                raise OSError('confirm down')
+            return 'mocked-record'
+
+        app.send_prepared = fail_confirm
+        try:
+            self.flag(1, 'not my charge')
+            res = self.client.post(f'/v/{self.token}/submit')
+            self.assertEqual(res.status_code, 303)
+        finally:
+            app.send_prepared = real
+        self.assertEqual([''.join(str(m['Subject']).splitlines()) for m in calls], [
+            'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 1 flagged',
+            'Your American Express charges were submitted',
+            'Review your flagged charges',
+        ])
+        record_log = next(r for r in app.read_log() if r['type'] == 'email')
+        self.assertEqual(record_log['status'], 'mocked-record')
+        self.assertIn('Note: not my charge', self.message_text(calls[0])[0])
+        confirm_log = next(r for r in app.read_log() if r['type'] == 'submit_confirm_email')
+        self.assertTrue(str(confirm_log['status']).startswith('error: OSError:'))
+        review_log = next(r for r in app.read_log() if r['type'] == 'flag_review_email')
+        self.assertEqual(review_log['status'], 'mocked-record')
+
     def test_flag_review_email_follows_the_filing_record(self):
         """One review email to the employee. The filing record still goes out first, with the flag reasons."""
         calls = []
@@ -451,9 +509,10 @@ class FlagNoteTest(unittest.TestCase):
             self.assertEqual(res.status_code, 303)
             self.assertEqual([''.join(str(m['Subject']).splitlines()) for m in calls], [
                 'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 2 flagged',
+                'Your American Express charges were submitted',
                 'Review your flagged charges',
             ])
-            record, review = calls
+            record, _confirm, review = calls
             self.assertEqual(record['To'], 'littledude@mail.grokbot.com')
             self.assertEqual(record['From'], app.MAIL_FROM)
             record_text, _record_html = self.message_text(record)
@@ -471,7 +530,7 @@ class FlagNoteTest(unittest.TestCase):
             self.assertIn('Office supplies', review_html)
             self.assertEqual(len([m for m in calls if str(m['Subject']) == 'Review your flagged charges']), 1)
             self.assertEqual(self.client.post(f'/v/{self.token}/submit').status_code, 303)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 3)
         finally:
             app.send_prepared = real
 
@@ -494,6 +553,7 @@ class FlagNoteTest(unittest.TestCase):
             app.send_prepared = real
         self.assertEqual(calls, [
             'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 1 flagged',
+            'Your American Express charges were submitted',
             'Review your flagged charges',
         ])
         record = next(r for r in app.read_log() if r['type'] == 'email')
@@ -518,9 +578,14 @@ class FlagNoteTest(unittest.TestCase):
             self.assertEqual(res.status_code, 303)
         finally:
             app.send_prepared = real
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0].startswith('Amex verification SUBMITTED:'))
+        self.assertEqual(calls, [
+            'Amex verification SUBMITTED: Sample Employee - American Express charges October 2026 - 0 flagged',
+            'Your American Express charges were submitted',
+        ])
         self.assertEqual([r for r in app.read_log() if r['type'] == 'flag_review_email'], [])
+        confirm = next(r for r in app.read_log() if r['type'] == 'submit_confirm_email')
+        self.assertEqual(confirm['to'], 'sample@coxresearch.com')
+        self.assertEqual(confirm['status'], 'mocked')
 
     def test_flag_review_without_an_address_is_logged(self):
         path = pathlib.Path(app.DATA_DIR, 'statements', STMT + '.json')
@@ -551,6 +616,12 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(review['to'], '')
         self.assertIn('no employee email', review['status'])
         self.assertTrue(str(review['status']).startswith('error:'))
+        confirm = next(r for r in app.read_log() if r['type'] == 'submit_confirm_email')
+        self.assertEqual(confirm['to'], '')
+        self.assertIn('no employee email', confirm['status'])
+        record = next(r for r in app.read_log() if r['type'] == 'email')
+        self.assertEqual(record['status'], 'mocked')
+        self.assertEqual(record['to'], 'littledude@mail.grokbot.com')
 
     def test_record_address_credits_and_alice_routing(self):
         self.assertEqual(app.normalize_record_to('littledude@coxresearch.com'), 'littledude@mail.grokbot.com')
