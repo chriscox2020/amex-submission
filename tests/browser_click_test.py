@@ -33,7 +33,7 @@ with sync_playwright() as p:
     assert groups == ['Office', 'Travel', 'Shop Supplies'], groups
     options = sel.locator('option').evaluate_all('els => els.map(e => e.value)')
     for name in ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance'):
+                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance'):
         assert name in options, options
     assert sel.input_value() == 'Restaurant'
     assert sel.locator('option[selected]').inner_text() == 'Restaurant (current)'
