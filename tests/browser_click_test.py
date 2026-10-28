@@ -28,16 +28,23 @@ with sync_playwright() as p:
     assert 'Credit' in credit.inner_text()
     assert '$17,048.40' in pg.locator('tr.ft').nth(0).inner_text()
     assert '$17,024.09' in pg.locator('tr.net').inner_text()
-    sel = pg.locator('select.catsel').first
-    groups = sel.locator('optgroup').evaluate_all('els => els.map(e => e.label)')
-    assert groups == ['Office', 'Travel', 'Shop Supplies', 'Auto Maintenance'], groups
-    options = sel.locator('option').evaluate_all('els => els.map(e => e.value)')
+    btn = pg.locator('.catbtn').first
+    btn.click()
+    menu = pg.locator('.catmenu').first
+    menu.wait_for(state='visible')
+    groups = menu.locator('.cathead').all_inner_texts()
+    assert groups == ['Office', 'Shop Supplies', 'Automotive', 'Travel (hotels, other expenses)'], groups
+    options = menu.locator('.catopt').evaluate_all('els => els.map(e => e.getAttribute("data-value"))')
     for name in ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance'):
+                 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Travel Fuel', 'Auto Maintenance',
+                 'Travel', 'Other Expense'):
         assert name in options, options
-    assert sel.input_value() == 'Restaurant'
-    assert sel.locator('option[selected]').inner_text() == 'Restaurant (current)'
-    assert 'Other' not in options and 'Equipment Rental' not in options
+    assert options[-1] == 'Other Expense'
+    assert 'Hotel' not in options and 'Other' not in options and 'Equipment Rental' not in options
+    assert btn.inner_text() == 'Restaurant (current)'
+    assert menu.locator('.catopt.cur').first.inner_text() == 'Restaurant (current)'
+    pg.keyboard.press('Escape')
+    menu.wait_for(state='hidden')
 
     pg.emulate_media(media='print')
     assert pg.locator('button.sub').is_hidden()
@@ -60,14 +67,14 @@ with sync_playwright() as p:
 
     pg.locator('button.fb').nth(0).click()
     pg.locator('#pop').wait_for(state='visible')
-    pg.locator('#pop label').filter(has_text='Not my charge').click()
+    pg.locator('#pop label').filter(has_text='No receipt').click()
     pg.fill('#popnote', 'a <b>tag</b>')
     pg.locator('#popsave').click()
     pg.locator('#pop').wait_for(state='hidden')
     pg.wait_for_selector('tr.f')
     assert pg.locator('tr.nx').count() == 1
     assert pg.locator('#flaglist b').count() == 0
-    assert 'Note: Not my charge: a <b>tag</b>' in pg.inner_text('#flaglist')
+    assert 'Note: No receipt: a <b>tag</b>' in pg.inner_text('#flaglist')
     assert 'ref pending' in pg.inner_text('#flaglist')
     pg.locator('button.fb').nth(2).click()
     pg.locator('#pop').wait_for(state='visible')
@@ -83,7 +90,7 @@ with sync_playwright() as p:
     assert pg.locator('#pop').is_hidden()
     pg.locator('button.fb').nth(0).click()
     pg.locator('#pop').wait_for(state='visible')
-    pg.locator('#pop label').filter(has_text='Not my charge').click()
+    pg.locator('#pop label').filter(has_text='No receipt').click()
     pg.fill('#popnote', 'a <b>tag</b>')
     pg.locator('#popsave').click()
     pg.wait_for_function("document.querySelectorAll('tr.f').length==2")
@@ -94,16 +101,17 @@ with sync_playwright() as p:
     first_cat = pg.locator('td.cat').first
     original = first_cat.get_attribute('data-orig')
     with pg.expect_response(lambda r: '/category/' in r.url and r.status == 200):
-        first_cat.locator('select.catsel').select_option('Gift')
+        first_cat.locator('.catbtn').click()
+        first_cat.locator('.catopt', has_text='Gift').click()
     edited = pg.locator('td.cat').first
-    assert edited.locator('select.catsel').input_value() == 'Gift'
+    assert edited.locator('.catbtn').inner_text() == 'Gift'
     assert edited.locator('s.orig').inner_text() == original
     pg.screenshot(path='screenshots/browser-category-edit.png')
     pg.locator('button.sub').click()
     pg.wait_for_selector('.done')
     done = pg.inner_text('.done')
     print('after Submit click:', done)
-    assert 'Note: Not my charge: a <b>tag</b>' in done and 'Note: Wrong price: Second look' in done
+    assert 'Note: No receipt: a <b>tag</b>' in done and 'Note: Wrong price: Second look' in done
     assert 'ref pending' in done
     assert 'Flagged charges: wrong category' in done
     assert pg.locator('#fcb').count() == 0

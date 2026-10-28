@@ -9,7 +9,8 @@ from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
 AMEX_CATEGORIES = ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-                   'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance')
+                   'Job Materials', 'Supplies', 'Repair & Maintenance', 'Travel Fuel', 'Auto Maintenance',
+                   'Travel', 'Other Expense')
 UNCATEGORIZED = 'Uncategorized'
 
 
