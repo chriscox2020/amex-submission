@@ -169,12 +169,12 @@ class SummaryTest(unittest.TestCase):
 
         self.submit_employee(self.ada, 'Gift', 2)
         types = [r['type'] for r in app.read_log() if r.get('stmt') == AUG and r['type'] != 'open']
-        self.assertEqual(types, ['category', 'submit', 'email'])
+        self.assertEqual(types, ['category', 'submit', 'email', 'submit_confirm_email'])
         self.assertFalse(pathlib.Path(app.DATA_DIR, 'summaries').exists())
         self.assertEqual(self.qb_messages(), [])
-        employee_mail = list(pathlib.Path(app.OUTBOX).glob('*.eml'))
-        self.assertEqual(len(employee_mail), 1)
-        msg = email.message_from_bytes(employee_mail[0].read_bytes())
+        employee_mail = [email.message_from_bytes(p.read_bytes())
+                         for p in pathlib.Path(app.OUTBOX).glob('*.eml')]
+        msg = next(m for m in employee_mail if str(m['Subject'] or '').startswith('Amex verification SUBMITTED:'))
         self.assertEqual(msg['To'], 'other@example.com')
         self.assertEqual(''.join(str(msg['Subject']).splitlines()),
                          'Amex verification SUBMITTED: Ada - American Express charges August 2026 - 0 flagged')
