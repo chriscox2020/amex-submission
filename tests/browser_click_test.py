@@ -30,10 +30,10 @@ with sync_playwright() as p:
     assert '$17,024.09' in pg.locator('tr.net').inner_text()
     sel = pg.locator('select.catsel').first
     groups = sel.locator('optgroup').evaluate_all('els => els.map(e => e.label)')
-    assert groups == ['Office', 'Travel', 'Shop Supplies'], groups
+    assert groups == ['Office', 'Travel', 'Shop Supplies', 'Auto Maintenance'], groups
     options = sel.locator('option').evaluate_all('els => els.map(e => e.value)')
     for name in ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance'):
+                 'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance'):
         assert name in options, options
     assert sel.input_value() == 'Restaurant'
     assert sel.locator('option[selected]').inner_text() == 'Restaurant (current)'

@@ -135,11 +135,12 @@ class FlagNoteTest(unittest.TestCase):
         self.assertEqual(app.AMEX_CATEGORY_GROUPS, (
             ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
             ('Travel', ('Travel', 'Travel Fuel')),
-            ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance')),
+            ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
+            ('Auto Maintenance', ('Auto Maintenance',)),
         ))
         self.assertEqual(tuple(app.AMEX_CATEGORIES), (
             'Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses',
-            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance'))
+            'Travel', 'Travel Fuel', 'Job Materials', 'Supplies', 'Repair & Maintenance', 'Auto Maintenance'))
         self.assertEqual(tuple(summary.AMEX_CATEGORIES), tuple(app.AMEX_CATEGORIES))
         self.assertNotIn('Other', app.AMEX_CATEGORIES)
         self.assertNotIn('Other Expense', app.AMEX_CATEGORIES)
@@ -182,6 +183,7 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn("<optgroup label='Office'>", page)
         self.assertIn("<optgroup label='Travel'>", page)
         self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'>", page)
         self.assertNotIn("<option value='Office'", page)
         self.assertNotIn("<option value='Shop Supplies'", page)
         for name in app.AMEX_CATEGORIES:
@@ -345,6 +347,9 @@ class FlagNoteTest(unittest.TestCase):
         self.assertIn("<optgroup label='Office'>", page)
         self.assertIn("<optgroup label='Travel'>", page)
         self.assertIn("<optgroup label='Shop Supplies'>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'>", page)
+        self.assertIn("<optgroup label='Shop Supplies'><option value='Job Materials'>Job Materials</option><option value='Supplies'>Supplies</option><option value='Repair &amp; Maintenance'>Repair &amp; Maintenance</option></optgroup>", page)
+        self.assertIn("<optgroup label='Auto Maintenance'><option value='Auto Maintenance'>Auto Maintenance</option></optgroup>", page)
         self.assertNotIn("<option value='Office'", page)
         self.assertNotIn("<option value='Shop Supplies'", page)
         self.assertNotIn("<option value='Other'", page)

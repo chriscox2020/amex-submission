@@ -209,7 +209,8 @@ REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'ref
 AMEX_CATEGORY_GROUPS = (
     ('Office', ('Meals and Entertainment', 'Gift', 'Utilities', 'Freight & Delivery', 'Office Expenses')),
     ('Travel', ('Travel', 'Travel Fuel')),
-    ('Shop Supplies', ('Job Materials', 'Supplies', 'Auto Maintenance', 'Repair & Maintenance')),
+    ('Shop Supplies', ('Job Materials', 'Supplies', 'Repair & Maintenance')),
+    ('Auto Maintenance', ('Auto Maintenance',)),
 )
 AMEX_CATEGORIES = tuple(name for _label, names in AMEX_CATEGORY_GROUPS for name in names)
 
