@@ -16,7 +16,8 @@ import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
 from datetime import datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
-from flask import Flask, request, abort, Response, jsonify, redirect
+from flask import Flask, request, abort, Response, jsonify, redirect, session
+from urllib.parse import urlsplit
 import summary
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -45,6 +46,14 @@ TZ = ZoneInfo('America/Chicago')
 LOCK = threading.Lock()
 SUBMIT_LOCK = threading.Lock()   # run gunicorn with 1 worker so these locks are global
 app = Flask(__name__)
+# Signed admin session cookie. SECRET_KEY if set, else derived from TOKEN_SECRET (never hardcoded).
+_sk = os.environ.get('SECRET_KEY') or (hmac.new(os.environ.get('TOKEN_SECRET', '').encode(), b'admin-session-v1', hashlib.sha256).hexdigest() if os.environ.get('TOKEN_SECRET') else '')
+if _sk:
+    app.secret_key = _sk
+from datetime import timedelta
+app.config.update(SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', '1') != '0',
+                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
+                  SESSION_COOKIE_NAME='amex_admin', PERMANENT_SESSION_LIFETIME=timedelta(hours=12))
 os.makedirs(OUTBOX, exist_ok=True)
 
 # ---------- statements & tokens ----------
@@ -1275,22 +1284,89 @@ def set_category(token, row):
     return redirect(f'/v/{token}', 303)
 
 # ---------- Chris and Meghan admin ----------
+def _check_login(username, password):
+    """Who signs in, or None. Username must be Chris or Meghan; password is ADMIN_PASSWORD."""
+    if not ADMIN_PASSWORD or not hmac.compare_digest((password or '').encode(), ADMIN_PASSWORD.encode()):
+        return None
+    return SUMMARY_ACTORS.get((username or '').strip().casefold())
+
+def _safe_next(nxt):
+    nxt = nxt or '/admin'
+    u = urlsplit(nxt)
+    if u.scheme or u.netloc or not nxt.startswith('/') or nxt.startswith('//') or '\\' in nxt:
+        return '/admin'
+    return nxt
+
 def need_admin():
-    """Every /admin route. Username must be Chris or Meghan, and the password is ADMIN_PASSWORD.
+    """Every /admin route. Signed session cookie from /admin/login, or (for scripts) Basic auth.
 
     An employee token is not a password and cannot open these routes.
     """
+    who = session.get('admin_who')
+    if who in SUMMARY_ACTORS.values():
+        return who
     a = request.authorization
-    if not ADMIN_PASSWORD or not a or not hmac.compare_digest(a.password or '', ADMIN_PASSWORD):
-        abort(Response('Login required', 401, {'WWW-Authenticate': 'Basic realm="Cox Amex admin"'}))
-    who = SUMMARY_ACTORS.get((a.username or '').strip().casefold())
-    if not who:
-        abort(Response('Chris or Meghan only', 403))
-    return who
+    if a and a.password is not None:
+        if not ADMIN_PASSWORD or not hmac.compare_digest(a.password.encode(), ADMIN_PASSWORD.encode()):
+            abort(Response('Login required', 401))
+        who = SUMMARY_ACTORS.get((a.username or '').strip().casefold())
+        if not who:
+            abort(Response('Chris or Meghan only', 403))
+        return who
+    wants_json = (request.path.endswith('.json') or request.path.startswith('/admin/upload')
+                  or 'application/json' in request.headers.get('Accept', '') or request.method != 'GET')
+    if wants_json:
+        abort(Response('Login required', 401))
+    nxt = request.full_path.rstrip('?') if request.query_string else request.path
+    abort(redirect('/admin/login?next=' + quote_url(nxt), 303))
+
+def quote_url(s):
+    from urllib.parse import quote
+    return quote(s, safe='')
+
+LOGIN_PAGE = """<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Amex admin sign in</title><style>
+body{font-family:Arial,Helvetica,sans-serif;background:#f2f4f7;margin:0;padding:24px}
+.card{max-width:520px;margin:40px auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(0,0,0,.12)}
+h1{font-size:34px;margin:0 0 24px}label{display:block;font-size:24px;margin:18px 0 8px}
+input{width:100%;box-sizing:border-box;font-size:26px;padding:18px;border:2px solid #888;border-radius:10px}
+button{width:100%;margin-top:30px;font-size:30px;padding:20px;border:0;border-radius:12px;background:#1565c0;color:#fff;font-weight:bold}
+.err{color:#c62828;font-size:22px;font-weight:bold;margin-bottom:10px}
+</style></head><body><div class='card'><h1>Amex admin sign in</h1>{err}
+<form method='post' action='/admin/login'>
+<input type='hidden' name='next' value='{nxt}'>
+<label for='username'>Username</label>
+<input id='username' name='username' autocomplete='username' autocapitalize='none' value='{user}' required>
+<label for='password'>Password</label>
+<input id='password' type='password' name='password' autocomplete='current-password' required>
+<button type='submit'>Sign in</button></form></div></body></html>"""
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    esc = html.escape
+    nxt = _safe_next(request.values.get('next'))
+    err, user = '', ''
+    if request.method == 'POST':
+        user = request.form.get('username', '')
+        who = _check_login(user, request.form.get('password', ''))
+        if who:
+            session.clear(); session['admin_who'] = who; session.permanent = True
+            return redirect(nxt, 303)
+        err = "<div class='err'>Wrong username or password.</div>"
+    body = LOGIN_PAGE.replace('{err}', err).replace('{nxt}', esc(nxt)).replace('{user}', esc(user))
+    return Response(body, 401 if err else 200, mimetype='text/html')
+
+@app.route('/admin/logout', methods=['GET', 'POST'])
+def admin_logout():
+    session.clear()
+    return redirect('/admin/login', 303)
 
 @app.before_request
 def guard_admin():
     path = request.path or ''
+    if path in ('/admin/login', '/admin/logout'):
+        return
     if path == '/admin' or path.startswith('/admin/'):
         need_admin()
 
