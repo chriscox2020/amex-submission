@@ -212,6 +212,60 @@ def sorted_rows(rows):
         return (dt, rid)
     return sorted(rows, key=key)
 
+# Chris, Nov 8 2026: employee katie-henderson on statement 2026-10-22 keeps
+# charge dates from Sep 23 through Oct 21, inclusive. The statement file keeps
+# every source row. No other employee, and no other statement, is filtered.
+KATIE_SCOPE_STMT = '2026-10-22'
+KATIE_SCOPE_EMP = 'katie-henderson'
+KATIE_SCOPE_START = datetime(2026, 9, 23).date()
+KATIE_SCOPE_END = datetime(2026, 10, 21).date()
+
+def katie_scope_applies(doc, emp):
+    if not isinstance(doc, dict) or not isinstance(emp, dict):
+        return False
+    if str(doc.get('stmt') or '') != KATIE_SCOPE_STMT:
+        return False
+    return str(emp.get('id') or '').strip().lower() == KATIE_SCOPE_EMP
+
+def row_charge_date(row):
+    raw = str((row or {}).get('date') or '').strip()
+    for fmt in ('%m/%d/%Y', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def review_rows(doc, emp):
+    """Rows for this employee's review and for a later PDF or spreadsheet.
+    Katie's scoped statement drops dates outside the window. Everyone else gets every stored row.
+    """
+    rows = list((emp or {}).get('rows') or [])
+    if not katie_scope_applies(doc, emp):
+        return rows
+    kept = []
+    for row in rows:
+        day = row_charge_date(row)
+        if day is not None and KATIE_SCOPE_START <= day <= KATIE_SCOPE_END:
+            kept.append(row)
+    return kept
+
+def katie_scope_phrase():
+    return f"{KATIE_SCOPE_START.strftime('%m/%d/%Y')} through {KATIE_SCOPE_END.strftime('%m/%d/%Y')}"
+
+def statement_for_review(doc):
+    """Copy used by the manual summary. Source statements on disk are not rewritten."""
+    if not isinstance(doc, dict):
+        return doc
+    out = dict(doc)
+    employees = []
+    for emp in doc.get('employees') or []:
+        one = dict(emp)
+        one['rows'] = review_rows(doc, emp)
+        employees.append(one)
+    out['employees'] = employees
+    return out
+
 NOTE_MAX = 500
 REF_KEYS = ('reference_number', 'reference', 'ref', 'ref_number', 'ref_no', 'referenceNumber')
 # Employee dropdown groups. Headings are optgroup labels and are not categories.
@@ -686,7 +740,7 @@ def final_chart_tables(doc):
             continue
         flagged_ids = set(sub.get('flagged') or [])
         charges = []
-        for source in sorted_rows(emp.get('rows') or []):
+        for source in sorted_rows(review_rows(doc, emp)):
             amount = float(source.get('amount') or 0)
             charges.append({
                 'employee': emp.get('name') or emp['id'],
@@ -1033,7 +1087,7 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
     others = [p for p in (doc.get('employees') or []) if p.get('id') != e.get('id')]
     if others:
         raise RuntimeError('employee page was given another cardholder')
-    rows = sorted_rows(e.get('rows') or [])
+    rows = sorted_rows(review_rows(doc, e))
     locked = submitted is not None
     categories = categories or {}
     if submitted is not None and 'comment' in submitted:
@@ -1048,6 +1102,8 @@ def render(doc, e, token, flags, submitted, comment='', categories=None):
              f"<meta name='robots' content='noindex'><title>American Express Charges - {esc(e['name'])}</title><style>{CSS}</style></head>"
              f"<body data-employee='{esc(e['id'])}'>"
              f"<div class='banner'>American Express Charges</div><h1>{esc(e['name'])}</h1><div class='sheet'>"]
+    if katie_scope_applies(doc, e):
+        parts.append(f"<p>Charges dated {esc(katie_scope_phrase())}.</p>")
     if locked:
         listed = f"<ul id='flaglist'>{lis}</ul>" if lis else ''
         comment_html = f"<p style='margin:8px 0 0'>{esc(flag_comment_line(comment))}</p>" if flag_comment_line(comment) else ''
@@ -1151,7 +1207,7 @@ def view(token):
 def flag(token, row):
     doc, e = resolve(token)
     if not doc: abort(404)
-    r = next((x for x in e['rows'] if x['id'] == row), None)
+    r = next((x for x in review_rows(doc, e) if x['id'] == row), None)
     if not r: abort(404)
     if is_credit_row(r):
         return jsonify(error='credit'), 400
@@ -1184,7 +1240,7 @@ def submit(token):
       if qb_record(doc['stmt']) and not sub:
           return Response('This month was sent for posting', 409)
       if not sub:
-          rows = sorted_rows(e['rows'])
+          rows = sorted_rows(review_rows(doc, e))
           flagged = attach_flag_meta([r for r in rows if r['id'] in flags], flags)
           approved = [dict(r) for r in rows if r['id'] not in flags]
           for r in flagged + approved:
@@ -1201,7 +1257,7 @@ def submit(token):
           approved_ids = {r['id'] for r in approved}
           by_flag = {r['id']: r for r in flagged}
           by_approved = {r['id']: r for r in approved}
-          for source in sorted_rows(e.get('rows') or []):
+          for source in rows:
               item = by_flag.get(source['id']) or by_approved.get(source['id'])
               if not item:
                   continue
@@ -1265,7 +1321,7 @@ def set_comment(token):
 def set_category(token, row):
     doc, e = resolve(token)
     if not doc: abort(404)
-    r = next((x for x in e['rows'] if x['id'] == row), None)
+    r = next((x for x in review_rows(doc, e) if x['id'] == row), None)
     if not r: abort(404)
     if is_credit_row(r):
         return jsonify(error='credit'), 400
@@ -1379,8 +1435,16 @@ def admin():
             flags, sub, _comment, _categories = state(stmt, e['id'])
             link = f"{PUBLIC_BASE}/v/{make_token(stmt, e['id'])}"
             st = f"<b style='color:#2e7d32'>Submitted {esc(nice(sub['ts']))}</b>" if sub else "<b style='color:#c62828'>Not submitted</b>"
+            shown = review_rows(doc, e)
+            source_rows = e.get('rows') or []
+            if len(shown) == len(source_rows):
+                charge_cell, total_cell = str(len(source_rows)), money(sum(r['amount'] for r in source_rows))
+            else:
+                charge_cell = f"{len(shown)} of {len(source_rows)}"
+                total_cell = (f"{money(sum(float(r.get('amount') or 0) for r in shown))} of "
+                              f"{money(sum(float(r.get('amount') or 0) for r in source_rows))}")
             rows.append(f"<tr><td>{stmt}</td><td>{esc(e['name'])}</td><td>{st}</td><td>{len(sub['flagged']) if sub else len(flags)}</td>"
-                        f"<td>{len(e['rows'])}</td><td>{money(sum(r['amount'] for r in e['rows']))}</td><td style='font-size:12px'>{esc(link)}</td></tr>")
+                        f"<td>{charge_cell}</td><td>{total_cell}</td><td style='font-size:12px'>{esc(link)}</td></tr>")
     return (f"<!doctype html><meta charset='utf-8'><title>Amex admin</title><body style='font-family:Arial;padding:16px'>"
             f"<h2>Amex verification - status</h2><p>Record email: {esc(EMAIL_MODE)} to {esc(RECORD_TO)}{' cc ' + esc(RECORD_CC) if RECORD_CC else ''}. "
             f"<a href='/admin/log.csv'>Download full log (CSV)</a> · <a href='/admin/summary'>Monthly summary</a></p>"
@@ -1438,7 +1502,7 @@ def _packet_for_submission(doc, emp):
         return None, None, None
     flagged_ids = set(sub.get('flagged') or [])
     packet = []
-    for source in sorted_rows(emp.get('rows') or []):
+    for source in sorted_rows(review_rows(doc, emp)):
         item = dict(source)
         item['amex_category'] = chosen_category(source, categories)
         item['flag_status'] = 'flagged' if source['id'] in flagged_ids else 'approved'
@@ -1596,7 +1660,7 @@ def summary_index():
     esc = html.escape
     rows = []
     for stmt, doc in sorted(load_statements().items(), reverse=True):
-        built = summary.build_summary(doc, state)
+        built = summary.build_summary(statement_for_review(doc), state)
         qb = qb_record(stmt)
         status = 'Sent for posting' if qb else ('Ready' if built['ready'] else 'Waiting')
         rows.append(f"<tr><td><a href='/admin/summary/{esc(stmt)}'>{esc(stmt)}</a></td>"
@@ -1611,7 +1675,7 @@ def summary_page(stmt):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    built = summary.build_summary(doc, state)
+    built = summary.build_summary(statement_for_review(doc), state)
     return Response(render_summary_page(built, actor, qb_record(stmt)), headers={'Cache-Control': 'no-store'})
 
 def _summary_download(stmt, kind):
@@ -1619,7 +1683,7 @@ def _summary_download(stmt, kind):
     doc = load_statements().get(stmt)
     if not doc:
         abort(404)
-    built = summary.build_summary(doc, state)
+    built = summary.build_summary(statement_for_review(doc), state)
     if kind == 'pdf':
         data, mime, ext = summary.build_pdf(built), 'application/pdf', 'pdf'
     elif kind == 'csv':
@@ -1651,7 +1715,7 @@ def summary_qb_submit(stmt):
     with SUBMIT_LOCK:
         if qb_record(stmt):
             return redirect(f'/admin/summary/{stmt}', 303)
-        built = summary.build_summary(doc, state)
+        built = summary.build_summary(statement_for_review(doc), state)
         if not built['ready']:
             return jsonify(error='not ready', difference=round(built['difference_cents'] / 100, 2)), 409
         folder, _records = write_summary_files(built)
