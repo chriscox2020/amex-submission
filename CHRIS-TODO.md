@@ -7,5 +7,5 @@
    Heads-up: GoDaddy says that if "security defaults" are on, this switches them off for the whole organization. If littledude uses MFA, make an app password and use that instead.
    Then in Render → amex-submission → Environment, type the littledude mailbox password into **SMTP_PASSWORD**.
 5. **Decide** whether every record email should also CC chris@coxresearch.com (yes or no).
-6. **GoDaddy DNS** (after Littledude creates the service): sign in to GoDaddy. Littledude adds one record, CNAME `amex` → `amex-submission.onrender.com`. Your email is not touched.
+6. **Links**: employee review links use `https://amex-submission.onrender.com`. Do not set `PUBLIC_BASE` to `https://amex.coxresearch.com`. That name has no public DNS, so a link built with it cannot be opened.
 7. **Say go** for the TEST email to chris@coxresearch.com only. Nothing goes to employees until you approve.

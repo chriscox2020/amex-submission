@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """STANDARD TEMPLATE (Chris, Oct 18 2026): "<Name>'s Amex charges", then name, due line, short instructions, and one Open my charges button. No charges in the email.
 make_v6-style builder (v7): one email HTML per employee, linking to their
-private page on https://amex.coxresearch.com.  The email has NO flag/submit
-GET links on purpose - Outlook Safe Links / scanners open links automatically,
-which would fake flags. All flagging and submitting happens on the page (POST).
+private page. The link host is app.public_base() (PUBLIC_BASE, otherwise
+RENDER_EXTERNAL_URL, otherwise https://amex-submission.onrender.com).
+A host that does not resolve, and amex.coxresearch.com, is rejected.
+The email has NO flag/submit GET links on purpose - Outlook Safe Links /
+scanners open links automatically, which would fake flags. All flagging and
+submitting happens on the page (POST).
 
   TOKEN_SECRET=<same value as on Render> python tools/make_email.py 2026-09-22 [emp-id ...]
 Writes out/<stmt>/<emp-id>.html and prints each link.  Builds files only; sends nothing."""
-import html, json, os, sys
+import html, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 os.environ.setdefault('DATA_DIR', os.path.join(ROOT, 'local-data'))
-BASE = os.environ.get('PUBLIC_BASE', 'https://amex.coxresearch.com').rstrip('/')
 import app
+BASE = app.public_base()
+if 'amex.coxresearch.com' in BASE:
+    raise SystemExit('refusing to build links on amex.coxresearch.com')
 stmt = sys.argv[1]; only = set(sys.argv[2:])
 doc = app.load_statements()[stmt]
 outdir = os.path.join(ROOT, 'out', stmt); os.makedirs(outdir, exist_ok=True)
@@ -45,5 +50,5 @@ for e in doc['employees']:
     open(os.path.join(outdir, e['id'] + '.subject.txt'), 'w').write(subject)
     open(os.path.join(outdir, e['id'] + '.to.txt'), 'w').write(send_to + '\n')
     fn = os.path.join(outdir, e['id'] + '.html'); open(fn, 'w').write(h)
-    assert 'mailto' not in h and h.count(url) == 1
+    assert 'mailto' not in h and h.count(url) == 1 and 'amex.coxresearch.com' not in h and 'amex.coxresearch.com' not in url
     print(e['id'], len(e['rows']), f'{tot:.2f}', 'to', send_to, url, fn)
