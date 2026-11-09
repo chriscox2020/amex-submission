@@ -12,7 +12,7 @@ Charge review stays in this app. An employee's Submit writes the log and the rec
 Chris and Meghan have a separate summary page. Sending that summary emails Littledude.
 This server does not call QuickBooks. Employee submit can file a copy of that submission to Dropbox.
 """
-import csv, hashlib, hmac, html, io, json, os, smtplib, ssl, threading, base64
+import csv, hashlib, hmac, html, io, ipaddress, json, os, smtplib, ssl, sys, threading, time, base64, socket
 from datetime import datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -26,7 +26,8 @@ LOG = os.path.join(DATA_DIR, 'log.jsonl')
 OUTBOX = os.path.join(DATA_DIR, 'outbox')
 TOKEN_SECRET = os.environ.get('TOKEN_SECRET', '')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
-PUBLIC_BASE = os.environ.get('PUBLIC_BASE', 'https://amex.coxresearch.com').rstrip('/')
+# Link origin is chosen by public_base() once the Flask app exists.
+# amex.coxresearch.com has no public DNS and must never be used in a link.
 EMAIL_MODE = os.environ.get('EMAIL_MODE', 'dryrun')          # dryrun | smtp | resend
 # Submission records. A stale littledude@coxresearch.com env value is rewritten
 # so the live service still delivers to this address.
@@ -55,6 +56,116 @@ app.config.update(SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
                   SESSION_COOKIE_NAME='amex_admin', PERMANENT_SESSION_LIFETIME=timedelta(hours=12))
 os.makedirs(OUTBOX, exist_ok=True)
+
+# Working service URL. Used when PUBLIC_BASE is unset and RENDER_EXTERNAL_URL is unset,
+# and whenever the configured host must not be put in a link.
+KNOWN_PUBLIC_BASE = 'https://amex-submission.onrender.com'
+DEAD_LINK_HOSTS = frozenset({'amex.coxresearch.com'})
+DNS_LOOKUP_TIMEOUT = 3.0
+DROPBOX_RETRY_DELAYS = (0.0, 0.5, 1.5)
+SMTP_RETRY_DELAYS = (0.0, 0.5, 1.5)
+HTTP_RETRY_DELAYS = (0.0, 0.5, 1.5)
+_PUBLIC_BASE_LOGGED = set()
+_BAD_LOG_LINES = set()
+
+def _origin(url):
+    """scheme://host[:port] or '' if url is not an http(s) origin."""
+    raw = (url or '').strip()
+    if not raw:
+        return ''
+    if '://' not in raw:
+        raw = 'https://' + raw
+    parts = urlsplit(raw)
+    host = (parts.hostname or '').rstrip('.').lower()
+    if parts.scheme not in ('http', 'https') or not host:
+        return ''
+    try:
+        port = parts.port
+    except ValueError:
+        return ''
+    netloc = f'[{host}]' if ':' in host else host
+    if port:
+        netloc = f'{netloc}:{port}'
+    return f'{parts.scheme}://{netloc}'
+
+def _host_resolves(hostname):
+    """True when hostname is an IP, localhost, or a DNS name that answers.
+    A lookup that errors or exceeds DNS_LOOKUP_TIMEOUT does not resolve.
+    """
+    host = (hostname or '').strip().rstrip('.').lower()
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if host == 'localhost' or host.endswith('.localhost'):
+        return True
+    found = []
+
+    def lookup():
+        try:
+            found.append(bool(socket.getaddrinfo(host, None)))
+        except socket.gaierror:
+            found.append(False)
+        except OSError:
+            found.append(False)
+
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(DNS_LOOKUP_TIMEOUT)
+    if worker.is_alive() or not found:
+        return False
+    return bool(found[0])
+
+def _usable_base(candidate, reject_host=''):
+    """A link origin that is safe to email. The known service URL is the last resort."""
+    origin = _origin(candidate) or KNOWN_PUBLIC_BASE
+    host = (urlsplit(origin).hostname or '').rstrip('.').lower()
+    reject = (reject_host or '').rstrip('.').lower()
+    if host and host not in DEAD_LINK_HOSTS and host != reject and _host_resolves(host):
+        return origin
+    return KNOWN_PUBLIC_BASE
+
+def select_public_base():
+    """(origin, substituted, reason). substituted means the configured host was not used."""
+    explicit = os.environ.get('PUBLIC_BASE', '').strip()
+    render_url = _origin(os.environ.get('RENDER_EXTERNAL_URL', ''))
+    fallback = render_url or KNOWN_PUBLIC_BASE
+    if not explicit:
+        chosen = fallback
+    else:
+        chosen = _origin(explicit)
+        if not chosen:
+            return _usable_base(fallback), True, 'PUBLIC_BASE is not an http(s) URL'
+    host = (urlsplit(chosen).hostname or '').rstrip('.').lower()
+    if host in DEAD_LINK_HOSTS:
+        return _usable_base(fallback, reject_host=host), True, f'{host} must not be used for links'
+    if not _host_resolves(host):
+        return _usable_base(fallback, reject_host=host), True, f'{host} does not resolve'
+    return chosen, False, ''
+
+def public_base():
+    """Origin for /v/<token> links. Rechecked whenever a link is built.
+    A host that does not resolve, and amex.coxresearch.com, are logged and replaced.
+    """
+    chosen, substituted, reason = select_public_base()
+    if 'amex.coxresearch.com' in chosen:
+        chosen = KNOWN_PUBLIC_BASE
+        substituted = True
+        reason = reason or 'amex.coxresearch.com must not be used for links'
+    if substituted:
+        key = (reason, chosen)
+        if key not in _PUBLIC_BASE_LOGGED:
+            _PUBLIC_BASE_LOGGED.add(key)
+            message = f'PUBLIC_BASE rejected ({reason}); using {chosen}'
+            app.logger.error(message)
+            print(message, file=sys.stderr)
+    return chosen
+
+# Log a bad link host at startup, before the first email is built.
+public_base()
 
 # ---------- statements & tokens ----------
 def bundle_rev(doc):
@@ -92,8 +203,12 @@ def _load_stmt_dir(d):
     for f in sorted(os.listdir(d)):
         path = os.path.join(d, f)
         if f.endswith('.json') and os.path.isfile(path):
-            with open(path) as fh:
-                doc = json.load(fh)
+            try:
+                with open(path) as fh:
+                    doc = json.load(fh)
+            except (OSError, json.JSONDecodeError, UnicodeError) as ex:
+                app.logger.error('skipping unreadable statement %s: %s', path, type(ex).__name__)
+                continue
             if isinstance(doc, dict) and doc.get('stmt'):
                 out[doc['stmt']] = doc
     return out
@@ -151,9 +266,15 @@ def append(rec):
 def read_log():
     if not os.path.exists(LOG): return []
     out = []
-    for line in open(LOG):
-        try: out.append(json.loads(line))
-        except Exception: pass
+    with open(LOG) as fh:
+        for line in fh:
+            try:
+                out.append(json.loads(line))
+            except Exception as ex:
+                key = line[:80]
+                if key not in _BAD_LOG_LINES and len(_BAD_LOG_LINES) < 20:
+                    _BAD_LOG_LINES.add(key)
+                    app.logger.warning('skipping unreadable log line: %s', type(ex).__name__)
     return out
 
 def state(stmt, emp_id):
@@ -438,7 +559,7 @@ def record_email(doc, e, flagged, approved, ts, comment='', dropbox_failed=False
             f"(statement {doc['stmt']}) on {nice(ts)}.</p>"
             f"<p><b>Flagged - needs review before the bill is paid ({len(flagged)}, {money(ft)}):</b></p>{flag_html(flagged)}{comment_html}"
             f"<p><b>Approved ({len(approved)}, {money(at)}):</b></p>{tbl(approved)}"
-            f"<p style='color:#777;font-size:12px'>Automatic record from {PUBLIC_BASE}. Saved to the log on the server.</p>"
+            f"<p style='color:#777;font-size:12px'>Automatic record from {html.escape(public_base())}. Saved to the log on the server.</p>"
             f"{'<p>Dropbox filing failed</p>' if dropbox_failed else ''}</div>")
     text = (f"{e['name']} submitted {doc['label']} ({doc['stmt']}) at {ts}.\nFlagged ({len(flagged)}, {money(ft)}):\n" +
             ''.join(f"  {flag_line(r, r.get('note', ''), r.get('flagged_ts', ''))}\n" for r in flagged) +
@@ -447,15 +568,70 @@ def record_email(doc, e, flagged, approved, ts, comment='', dropbox_failed=False
             ('Dropbox filing failed\n' if dropbox_failed else ''))
     return subj, body, text
 
+def _urlopen_with_retry(req, timeout, delays, what):
+    """POST/GET with retries on connection loss and HTTP 429/5xx. Other HTTP errors are not retried."""
+    import urllib.error
+    import urllib.request
+    last = None
+    for attempt, delay in enumerate(delays, 1):
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as ex:
+            last = ex
+            code = ex.code
+            try:
+                ex.close()
+            except Exception:
+                pass
+            if code not in (429, 500, 502, 503, 504) or attempt == len(delays):
+                raise
+            app.logger.warning('%s HTTP %s (attempt %s/%s)', what, code, attempt, len(delays))
+        except (urllib.error.URLError, TimeoutError, OSError) as ex:
+            last = ex
+            app.logger.warning('%s failed (attempt %s/%s): %s', what, attempt, len(delays), type(ex).__name__)
+            if attempt == len(delays):
+                raise
+    raise last
+
+def _smtp_deliver(msg):
+    """Open SMTP, log in, and send once. Retry only before the message is handed to send_message."""
+    host = os.environ.get('SMTP_HOST', 'smtp.office365.com')
+    port = int(os.environ.get('SMTP_PORT', '587'))
+    user = os.environ['SMTP_USER']
+    password = os.environ['SMTP_PASSWORD']
+    last = None
+    for attempt, delay in enumerate(SMTP_RETRY_DELAYS, 1):
+        if delay:
+            time.sleep(delay)
+        phase = 'connect'
+        try:
+            with smtplib.SMTP(host, port, timeout=30) as server:
+                server.starttls(context=ssl.create_default_context())
+                server.login(user, password)
+                phase = 'send'
+                server.send_message(msg)
+            return 'sent-smtp'
+        except smtplib.SMTPAuthenticationError:
+            raise
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPDataError, smtplib.SMTPSenderRefused):
+            raise
+        except (smtplib.SMTPException, OSError, TimeoutError) as ex:
+            last = ex
+            if phase == 'send':
+                app.logger.error('SMTP send failed after login; not retrying: %s', type(ex).__name__)
+                raise
+            app.logger.warning('SMTP connect attempt %s/%s failed: %s', attempt, len(SMTP_RETRY_DELAYS), type(ex).__name__)
+            if attempt == len(SMTP_RETRY_DELAYS):
+                raise
+    raise last
+
 def send_prepared(msg):
     """Deliver an already built message. Dry-run writes it to the outbox and sends nothing."""
     if EMAIL_MODE == 'smtp':
-        host = os.environ.get('SMTP_HOST', 'smtp.office365.com'); port = int(os.environ.get('SMTP_PORT', '587'))
-        with smtplib.SMTP(host, port, timeout=30) as s:
-            s.starttls(context=ssl.create_default_context())
-            s.login(os.environ['SMTP_USER'], os.environ['SMTP_PASSWORD'])
-            s.send_message(msg)
-        return 'sent-smtp'
+        return _smtp_deliver(msg)
     if EMAIL_MODE == 'resend':
         import urllib.request
         text = html_body = None
@@ -480,7 +656,7 @@ def send_prepared(msg):
         req = urllib.request.Request('https://api.resend.com/emails', method='POST',
             data=json.dumps(data).encode(),
             headers={'Authorization': 'Bearer ' + os.environ['RESEND_API_KEY'], 'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=30) as r: r.read()
+        _urlopen_with_retry(req, timeout=30, delays=HTTP_RETRY_DELAYS, what='Resend')
         return 'sent-resend'
     fn = os.path.join(OUTBOX, datetime.now(TZ).strftime('%Y%m%d-%H%M%S-') + hashlib.sha1(str(msg['Subject'] or '').encode()).hexdigest()[:6] + '.eml')
     with open(fn, 'wb') as fh:
@@ -570,11 +746,12 @@ def dropbox_credentials():
     return key, secret, refresh
 
 def dropbox_call(url, data, headers):
-    """One Dropbox HTTP POST. Tests replace this. Never used for sharing or delete."""
+    """One Dropbox HTTP POST, retried on connection loss and HTTP 429/5xx.
+    Tests replace this. Never used for sharing or delete.
+    """
     import urllib.request
     req = urllib.request.Request(url, data=data, method='POST', headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+    return _urlopen_with_retry(req, timeout=60, delays=DROPBOX_RETRY_DELAYS, what='Dropbox')
 
 def dropbox_access_token():
     """Exchange the refresh token for a short-lived access token. The refresh token is not reused as a bearer."""
@@ -1272,6 +1449,7 @@ def submit(token):
                       'ts': now(), 'status': 'ok'})
           except Exception as ex:
               dropbox_failed = True
+              app.logger.error('Dropbox filing failed for %s %s: %s', doc.get('stmt'), e.get('id'), type(ex).__name__)
               append({'type': 'dropbox_file', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
                       'ts': now(), 'status': 'Dropbox filing failed: ' + f'{type(ex).__name__}: {ex}'})
           try:
@@ -1279,6 +1457,7 @@ def submit(token):
                                                 dropbox_failed=dropbox_failed))
           except Exception as ex:
               status = f'error: {type(ex).__name__}: {ex}'
+              app.logger.error('Record email failed for %s %s: %s', doc.get('stmt'), e.get('id'), type(ex).__name__)
           append({'type': 'email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'], 'ts': now(),
                   'to': RECORD_TO, 'cc': RECORD_CC, 'status': status})
           # After the filing record. A failure here does not change that record or the submit.
@@ -1287,6 +1466,7 @@ def submit(token):
               cstatus = send_submit_confirm(doc, e, rows, rec['ts'])
           except Exception as ex:
               cstatus = f'error: {type(ex).__name__}: {ex}'
+              app.logger.error('Submit confirmation email failed for %s %s: %s', doc.get('stmt'), e.get('id'), type(ex).__name__)
           append({'type': 'submit_confirm_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
                   'ts': now(), 'to': addr, 'count': len(rows), 'status': cstatus})
           # After the filing record. A failure here does not change the submit.
@@ -1296,6 +1476,7 @@ def submit(token):
                   freview = send_flag_review(doc, e, flagged)
               except Exception as ex:
                   freview = f'error: {type(ex).__name__}: {ex}'
+                  app.logger.error('Flag review email failed for %s %s: %s', doc.get('stmt'), e.get('id'), type(ex).__name__)
               append({'type': 'flag_review_email', 'stmt': doc['stmt'], 'emp_id': e['id'], 'emp': e['name'],
                       'ts': now(), 'to': addr, 'count': len(flagged), 'status': freview})
     return redirect(f'/v/{token}', 303)
@@ -1430,10 +1611,11 @@ def guard_admin():
 def admin():
     need_admin(); esc = html.escape
     rows = []
+    base = public_base()
     for stmt, doc in sorted(load_statements().items(), reverse=True):
         for e in doc['employees']:
             flags, sub, _comment, _categories = state(stmt, e['id'])
-            link = f"{PUBLIC_BASE}/v/{make_token(stmt, e['id'])}"
+            link = f"{base}/v/{make_token(stmt, e['id'])}"
             st = f"<b style='color:#2e7d32'>Submitted {esc(nice(sub['ts']))}</b>" if sub else "<b style='color:#c62828'>Not submitted</b>"
             shown = review_rows(doc, e)
             source_rows = e.get('rows') or []
@@ -1468,24 +1650,40 @@ def admin_csv():
 @app.get('/admin/links.json')
 def admin_links():
     need_admin()
-    return jsonify({stmt: {e['id']: {'name': e['name'], 'email': e.get('email', ''), 'url': f"{PUBLIC_BASE}/v/{make_token(stmt, e['id'])}"}
+    base = public_base()
+    return jsonify({stmt: {e['id']: {'name': e['name'], 'email': e.get('email', ''), 'url': f"{base}/v/{make_token(stmt, e['id'])}"}
                            for e in doc['employees']} for stmt, doc in load_statements().items()})
 
 @app.post('/admin/upload')
 def admin_upload():
     """Add/replace a statement without a redeploy: POST the statements/<stmt>.json body."""
-    need_admin(); doc = request.get_json(force=True)
-    assert doc.get('stmt') and isinstance(doc.get('employees'), list)
+    need_admin()
+    doc = request.get_json(force=True, silent=True)
+    stmt = str(doc.get('stmt') or '').strip() if isinstance(doc, dict) else ''
+    employees = doc.get('employees') if isinstance(doc, dict) else None
+    if (not stmt or '/' in stmt or '\\' in stmt or stmt.startswith('.')
+            or not isinstance(employees, list)
+            or any(not isinstance(e, dict) or not str(e.get('id') or '').strip() for e in employees)):
+        return jsonify(error='statement JSON needs stmt and employees'), 400
+    doc['stmt'] = stmt
     bundled_path = os.path.join(APP_DIR, 'statements', 'bundled', doc['stmt'] + '.json')
     bundled = {}
     if os.path.isfile(bundled_path):
-        with open(bundled_path) as fh:
-            bundled = json.load(fh)
+        try:
+            with open(bundled_path) as fh:
+                bundled = json.load(fh)
+        except (OSError, json.JSONDecodeError, UnicodeError) as ex:
+            app.logger.error('ignoring unreadable bundled statement %s: %s', bundled_path, type(ex).__name__)
+            bundled = {}
     disk_path = os.path.join(DATA_DIR, 'statements', doc['stmt'] + '.json')
     current = {}
     if os.path.isfile(disk_path):
-        with open(disk_path) as fh:
-            current = json.load(fh)
+        try:
+            with open(disk_path) as fh:
+                current = json.load(fh)
+        except (OSError, json.JSONDecodeError, UnicodeError) as ex:
+            app.logger.error('replacing unreadable statement %s: %s', disk_path, type(ex).__name__)
+            current = {}
     # An upload always outranks the copy shipped in the image.
     doc['bundle_rev'] = max(bundle_rev(doc), bundle_rev(bundled), bundle_rev(current)) + 1
     lock_routing(doc)
@@ -1528,6 +1726,7 @@ def admin_dropbox_refile(stmt, emp_id):
         filed = file_submission_to_dropbox(doc, emp, packet, ts, comment or '')
     except Exception as ex:
         detail = f'{type(ex).__name__}: {ex}'
+        app.logger.error('Dropbox refile failed for %s %s: %s', stmt, emp_id, type(ex).__name__)
         append({'type': 'dropbox_file', 'stmt': stmt, 'emp_id': emp_id, 'emp': emp.get('name'),
                 'ts': now(), 'status': 'Dropbox filing failed: ' + detail, 'refile': True})
         return jsonify(error='Dropbox filing failed', detail=detail), 502
@@ -1722,6 +1921,7 @@ def summary_qb_submit(stmt):
         try:
             status = send_prepared(qb_email(built, actor))
         except Exception as ex:
+            app.logger.error('QuickBooks summary email failed for %s: %s', stmt, type(ex).__name__)
             return Response(f'Summary files were saved but the email failed: {type(ex).__name__}: {ex}', 502)
         payload = summary.category_payload(built)
         append({'type': 'qb_submit', 'stmt': stmt, 'by': actor, **meta(),

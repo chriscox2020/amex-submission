@@ -21,7 +21,7 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: PUBLIC_BASE
-        value: https://amex.coxresearch.com
+        value: https://amex-submission.onrender.com
       - key: TOKEN_SECRET          # signs the per-employee links; never change after links go out
         generateValue: true
       - key: ADMIN_PASSWORD        # Chris or Meghan: /admin, log, links, and summary
